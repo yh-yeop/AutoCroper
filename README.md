@@ -1,4 +1,6 @@
-# 흰 여백 자르기
+# AutoCroper · 흰 여백 자르기
+
+**바로 쓰기: https://yh-yeop.github.io/AutoCroper/**
 
 스캔본 · 흰 배경 사진의 흰 여백을 자동으로 잘라 내는 정적 웹앱. 빌드 도구 없이 `index.html` + `style.css` + `app.js`만으로 동작하고, **모든 처리는 브라우저 Canvas 안에서만** 한다(이미지는 서버로 전송되지 않음).
 
@@ -42,30 +44,27 @@ Web Worker · 다운로드가 `file://`에서는 막히는 브라우저가 있�
 ```bash
 # 저장소 루트에서
 python -m http.server 8000
-# → http://localhost:8000/crop/  ·  테스트: http://localhost:8000/crop/test.html
+# → http://localhost:8000/  ·  테스트: http://localhost:8000/test.html
 ```
 
 ## GitHub Pages 배포
 
 1. 이 저장소를 GitHub에 push한다.
 2. **Settings → Pages → Build and deployment**에서 Source를 **Deploy from a branch**, Branch를 **main**, 폴더를 **/ (root)** 로 두고 Save.
-3. 잠시 뒤 `https://<사용자명>.github.io/<저장소명>/crop/` 에서 열린다(이 저장소는 `https://yh-yeop.github.io/Plans/crop/`).
+3. 잠시 뒤 `https://<사용자명>.github.io/<저장소명>/` 에서 열린다(이 저장소는 https://yh-yeop.github.io/AutoCroper/).
 
-비공개 저장소는 무료 플랜에서 Pages를 쓸 수 없으니 **Settings → General → Danger Zone → Change visibility → Public**으로 먼저 공개한다.
-
-저장소 루트의 `.nojekyll`이 Jekyll 처리를 끄므로 파일이 그대로 배포된다. 외부 CDN 없이 JSZip 3.10.1을 [`vendor/jszip.min.js`](vendor/jszip.min.js)로 포함한다(MIT, [라이선스](vendor/JSZIP-LICENSE.md)).
+`.nojekyll`이 Jekyll 처리를 끄므로 파일이 그대로 배포된다. 외부 CDN 없이 JSZip 3.10.1을 [`vendor/jszip.min.js`](vendor/jszip.min.js)로 포함한다(MIT, [라이선스](vendor/JSZIP-LICENSE.md)).
 
 ## 파일
 
 ```
-.nojekyll              (저장소 루트) Pages에서 Jekyll 끄기
-crop/
-  index.html           화면
-  style.css            모바일 우선 · 다크/라이트 자동
-  app.js               크롭 코어(window.WhiteCrop) + UI. 워커 풀은 Blob URL로 생성
-  test.html            알고리즘 테스트 페이지
-  vendor/jszip.min.js  ZIP 생성(로컬 포함)
-  LICENSE              MIT
+index.html           화면
+style.css            모바일 우선 · 다크/라이트 자동
+app.js               크롭 코어(window.WhiteCrop) + UI. 워커 풀은 Blob URL로 생성
+test.html            알고리즘 테스트 페이지
+vendor/jszip.min.js  ZIP 생성(로컬 포함)
+.nojekyll            Pages에서 Jekyll 끄기
+LICENSE              MIT
 ```
 
 ## 한계
