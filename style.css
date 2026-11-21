@@ -178,7 +178,7 @@ figcaption { margin-top: 4px; font-size: 0.8rem; color: var(--muted); font-varia
 .card-msg { margin: 10px 0 0; padding: 7px 10px; border-radius: 6px; font-size: 0.85rem; }
 .card-msg.is-warn { background: var(--warn-bg); color: var(--warn-text); }
 .card-msg.is-info { color: var(--info-text); padding: 0; }
-.card-actions { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+.card-actions { display: flex; align-items: center; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
 .card-part { color: var(--accent); font-weight: 600; margin-left: 4px; }
 .rotate { display: flex; align-items: center; gap: 6px; }
 .rot-label { min-width: 3ch; text-align: center; font-variant-numeric: tabular-nums; color: var(--muted); }

@@ -1896,7 +1896,8 @@
         msg: $('.card-msg', node),
         rotLabel: $('.rot-label', node),
         download: $('.dl-btn', node),
-        unsplit: $('.unsplit-btn', node)
+        unsplit: $('.unsplit-btn', node),
+        resplit: $('.resplit-btn', node)
       }
     };
     it.ui.name.textContent = it.name;
@@ -1907,9 +1908,12 @@
       tag.textContent = it.part + ' / ' + it.count;
       it.ui.name.appendChild(tag);
       it.ui.unsplit.hidden = false;
+      it.ui.resplit.hidden = false;
       it.ui.unsplit.addEventListener('click', function () { unsplitGroup(it.group, true); });
       it.group.children.push(it);
+      it.ui.resplit.textContent = '다시 나누기';
     }
+    it.ui.resplit.addEventListener('click', function () { resplit(it); });
     node.classList.add('is-loading');
     setItemMsg(it, '차례를 기다리는 중…', 'info');
     $('.rm-btn', node).addEventListener('click', function () { removeItem(it); });
@@ -2065,6 +2069,7 @@
         return syncDeskew(it).then(function () {
           if (it.removed) return;
           if (!it.state) applyState(it, base);
+          if (typeof findPhotoRegions === 'function') it.ui.resplit.hidden = false;
           it.node.classList.remove('is-loading');
           updateItem(it);
           maybeAutoSave(it);
@@ -2091,18 +2096,69 @@
     var res;
     try { res = findPhotoRegions(it.base.analysis, opts.threshold, {}); } catch (_) { return false; }
     if (!res || !res.regions || res.regions.length < 2) return false;
-    var group = { name: it.name, file: it.file, bitmap: it.base.bitmap, analysis: it.base.analysis, children: [] };
+    splitInto({ name: it.name, file: it.file, bitmap: it.base.bitmap, analysis: it.base.analysis }, res, it.node, it);
+    detachItem(it, false); // 원본 비트맵은 그룹이 가진다
+    setStatus(it.name + ': 사진 ' + res.regions.length + '장을 찾아 나눴습니다.');
+    return true;
+  }
+
+  // 원본(src: name · file · bitmap · analysis)을 res의 영역들로 나눠 카드를 만든다
+  function splitInto(src, res, beforeNode, beforeItem) {
+    var group = { name: src.name, file: src.file, bitmap: src.bitmap, analysis: src.analysis, children: [] };
     var n = res.regions.length;
     for (var i = 0; i < n; i++) {
       addItem(null, {
-        bitmap: extractRegion(it.base.bitmap, it.base.analysis, res, i, {}),
-        name: it.name, group: group, part: i + 1, count: n,
-        before: it.node, beforeItem: it
+        bitmap: extractRegion(src.bitmap, src.analysis, res, i, {}),
+        name: src.name, group: group, part: i + 1, count: n,
+        before: beforeNode, beforeItem: beforeItem
       });
     }
-    detachItem(it, false); // 원본 비트맵은 그룹이 가진다
-    setStatus(it.name + ': 사진 ' + n + '장을 찾아 나눴습니다.');
-    return true;
+    return group;
+  }
+
+  /* 다시 나누기: 기본 설정으로 덜 나뉘었거나 안 나뉘었을 때, 점점 더 민감한 설정을 차례로 시도해
+   * 지금보다 많은 사진이 나오는 첫 결과를 쓴다(사진 수가 늘지 않으면 그대로 둔다). */
+  var SPLIT_LADDER = [
+    { t: 0, o: { maxStray: 0.6, maxStrayArea: 0.4 } },                          // 문서 판정 느슨하게
+    { t: 0, o: { maxStray: 0.6, maxStrayArea: 0.4, mergeBands: false } },       // 조각 합치기 끔
+    { t: -15, o: { maxStray: 0.6, maxStrayArea: 0.4, mergeBands: false } },     // 흐린 사진까지
+    { t: 20, o: { maxStray: 0.6, maxStrayArea: 0.4, mergeBands: false } },      // 밝은 틈을 더 잘 보도록
+    { t: 0, o: { maxStray: 0.6, maxStrayArea: 0.4, mergeBands: false, minArea: 0.006 } },  // 작은 사진까지
+    { t: 0, o: { maxStray: 0.6, maxStrayArea: 0.4, mergeBands: false, lightThreshold: 6 } } // 아주 밝은 사진
+  ];
+  function findMoreRegions(analysis, atLeast) {
+    for (var k = 0; k < SPLIT_LADDER.length; k++) {
+      var step = SPLIT_LADDER[k], res;
+      try { res = findPhotoRegions(analysis, Math.max(5, Math.min(120, opts.threshold + step.t)), step.o); } catch (_) { continue; }
+      if (res && res.regions && res.regions.length >= atLeast) return res;
+    }
+    return null;
+  }
+
+  function resplit(it) {
+    if (typeof findPhotoRegions !== 'function') return;
+    var g = it.group;
+    var src = g ? { name: g.name, file: g.file, bitmap: g.bitmap, analysis: g.analysis }
+                : (it.base && it.base.analysis ? { name: it.name, file: it.file, bitmap: it.base.bitmap, analysis: it.base.analysis } : null);
+    if (!src) return;
+    var have = g ? g.children.filter(function (c) { return !c.removed; }).length : 1;
+    it.ui.resplit.disabled = true;
+    setStatus(src.name + ': 더 꼼꼼하게 나눠 보는 중…');
+    setTimeout(function () { // 화면이 먼저 '중…'을 그리도록
+      var res = findMoreRegions(src.analysis, Math.max(2, have + 1));
+      it.ui.resplit.disabled = false;
+      if (!res) { setStatus(src.name + ': 더 나눌 사진을 찾지 못했어요. (잘못 나뉘었으면 \'한 장으로 되돌리기\')'); return; }
+      if (g) {
+        var kids = g.children.filter(function (c) { return !c.removed; });
+        g.children = [];
+        splitInto(src, res, kids[0].node, kids[0]);
+        kids.forEach(function (c) { c.group = null; removeItem(c); });
+      } else {
+        splitInto(src, res, it.node, it);
+        detachItem(it, false);
+      }
+      setStatus(src.name + ': 사진 ' + res.regions.length + '장으로 다시 나눴어요.');
+    }, 30);
   }
 
   function unsplitGroup(group, byUser) {
