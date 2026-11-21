@@ -1459,6 +1459,7 @@
     document.documentElement.classList.add('is-desktop');
     if (el.exeLink) el.exeLink.hidden = true;
     if (installBtn) installBtn.hidden = true;
+    var tl = document.getElementById('test-link'); if (tl) tl.hidden = true; // 테스트 페이지는 설치본에 없음
     if (typeof native.onOpenFiles === 'function') {
       native.onOpenFiles(function (files) {
         addFiles((files || []).map(function (f) {

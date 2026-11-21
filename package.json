@@ -1,0 +1,74 @@
+{
+  "name": "autocroper",
+  "productName": "AutoCroper",
+  "version": "1.0.0",
+  "description": "흰 배경 사진 · 스캔본의 흰 여백을 자동으로 잘라 내는 데스크톱 앱. 모든 처리는 이 컴퓨터 안에서만 이뤄집니다.",
+  "author": "yh-yeop",
+  "license": "MIT",
+  "homepage": "https://github.com/yh-yeop/AutoCroper",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yh-yeop/AutoCroper.git"
+  },
+  "private": true,
+  "main": "desktop/main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist:win": "electron-builder --win nsis --x64"
+  },
+  "devDependencies": {
+    "electron": "45.4.1",
+    "electron-builder": "26.18.0"
+  },
+  "build": {
+    "appId": "io.github.yh-yeop.autocroper",
+    "productName": "AutoCroper",
+    "copyright": "Copyright © 2026 yh-yeop",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "index.html",
+      "style.css",
+      "app.js",
+      "sw.js",
+      "manifest.webmanifest",
+      "vendor/**",
+      "icons/**",
+      "desktop/**",
+      "LICENSE",
+      "package.json"
+    ],
+    "asar": true,
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "AutoCroper",
+      "uninstallDisplayName": "AutoCroper",
+      "installerLanguages": [
+        "ko_KR"
+      ],
+      "language": "1042",
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "artifactName": "AutoCroper-Setup-${version}.exe",
+      "deleteAppDataOnUninstall": false,
+      "include": "build/installer.nsh"
+    }
+  }
+}
