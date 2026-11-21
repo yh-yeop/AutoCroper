@@ -305,6 +305,77 @@
         detail: '분석 ' + Math.round(t1 - t0) + 'ms (' + (WC.usingWorker() ? '워커 ' + WC.poolSize() + '개 병렬' : '메인 스레드') + '), 옵션 재계산 ' + (t2 - t1).toFixed(1) + 'ms' };
     });
 
+    // 기울기 보정까지 포함한 전체 파이프라인 (앱과 같은 순서)
+    async function cropDeskew(src, o) {
+      var bmp = src instanceof ImageBitmap ? src : await bitmapOf(src);
+      var a = await WC.analyzeBitmap(bmp);
+      var oo = opts(o);
+      var sk = WC.estimateSkew(a, oo.threshold, oo.noise);
+      var used = bmp, angle = 0;
+      if (Math.abs(sk.angle) >= WC.DESKEW_MIN) {
+        used = await WC.deskewBitmap(bmp, sk.angle);
+        a = await WC.analyzeBitmap(used);
+        angle = sk.angle;
+      }
+      var plan = WC.planCrop(a, oo);
+      var out = WC.renderOutput(used, oo.rotation || 0, plan.rect);
+      return { est: sk, angle: angle, plan: plan, out: out };
+    }
+
+    test('자동 기울기: 사진 각도 측정 (±0.1°)', async function () {
+      var angles = [0.3, 0.7, 2, -3.5, 5, 10], ok = true, notes = [];
+      for (var ang of angles) {
+        var c = canvas(1600, 2000, function (ctx) {
+          ctx.translate(780, 950); ctx.rotate(ang * Math.PI / 180);
+          drawPhoto(ctx, -400, -520, 800, 1040, 40);
+        });
+        var bmp = await jpegRoundTrip(c, 0.85);
+        var a = await WC.analyzeBitmap(bmp);
+        var sk = WC.estimateSkew(a, 40, 5);
+        var good = Math.abs(sk.angle - ang) <= 0.1;
+        ok = ok && good;
+        notes.push(ang + '°→' + sk.angle.toFixed(2) + '°' + (good ? '' : '✗'));
+        bmp.close();
+      }
+      return { pass: ok, detail: notes.join(' · ') };
+    });
+
+    test('자동 기울기: 보정 후 흰 틈 없이 원래 크기에 가깝게', async function () {
+      var ok = true, notes = [], thumbs = [];
+      for (var ang of [2, -5, 8]) {
+        var c = canvas(1600, 2000, function (ctx) {
+          ctx.translate(780, 950); ctx.rotate(ang * Math.PI / 180);
+          drawPhoto(ctx, -400, -520, 800, 1040, 41);
+        });
+        var r = await cropDeskew(await jpegRoundTrip(c, 0.85));
+        var e = edgePaperRatio(r.out, 10);
+        var lossW = 1 - r.out.width / 800, lossH = 1 - r.out.height / 1040;
+        var good = e === 0 && lossW >= -0.005 && lossW <= 0.015 && lossH >= -0.005 && lossH <= 0.015;
+        ok = ok && good;
+        notes.push(ang + '°: ' + r.out.width + '×' + r.out.height + ' (원래 800×1040), 종이색 ' + (e * 100).toFixed(2) + '%' + (good ? '' : ' ✗'));
+        if (thumbs.length < 2) thumbs.push(thumb(r.out));
+        if (ang === 8) thumbs.unshift(thumb(c));
+      }
+      return { pass: ok, detail: notes.join(' · '), thumbs: thumbs };
+    });
+
+    test('자동 기울기: 반듯한 사진 · 문서는 건드리지 않음', async function () {
+      var p = canvas(1200, 1500, function (ctx) { drawPhoto(ctx, 150, 150, 800, 1000, 42); });
+      var d = canvas(1000, 1300, function (ctx) {
+        ctx.fillStyle = '#222'; ctx.font = '22px sans-serif';
+        for (var i = 0; i < 25; i++) ctx.fillText('기울지 않은 문서 줄 ' + i + ' — The quick brown fox jumps', 120 + (i % 3) * 30, 200 + i * 36);
+      });
+      var dt = canvas(1000, 1300, function (ctx) {
+        ctx.translate(500, 650); ctx.rotate(3 * Math.PI / 180); ctx.translate(-500, -650);
+        ctx.fillStyle = '#222'; ctx.font = '22px sans-serif';
+        for (var i = 0; i < 25; i++) ctx.fillText('기운 문서 줄 ' + i + ' — The quick brown fox jumps over', 140, 200 + i * 36);
+      });
+      var rp = await cropDeskew(p), rd = await cropDeskew(d), rt = await cropDeskew(dt);
+      var tiltOk = rt.angle === 0 || Math.abs(rt.angle - 3) <= 0.2; // 문서는 보정하지 않거나, 하면 정확해야 함
+      return { pass: rp.angle === 0 && rd.angle === 0 && tiltOk,
+        detail: '반듯한 사진 ' + rp.est.angle.toFixed(2) + '° · 반듯한 문서 ' + rd.est.angle.toFixed(2) + '° · 3° 기운 문서 ' + (rt.angle ? rt.angle.toFixed(2) + '° 보정' : '보정 안 함') };
+    });
+
     function sameArray(a, b) {
       if (!a || !b || a.length !== b.length) return false;
       for (var i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;

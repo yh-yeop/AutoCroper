@@ -84,6 +84,14 @@
           bmp.close();
           self.postMessage({ id: msg.id, ok: true, rowCum: res.rowCum, colCum: res.colCum, dmap: res.dmap },
             [res.rowCum.buffer, res.colCum.buffer, res.dmap.buffer]);
+        } else if (msg.type === 'deskew') {
+          var ns = deskewSize(bmp.width, bmp.height, msg.angle);
+          var dc = new OffscreenCanvas(ns.w, ns.h), dctx = dc.getContext('2d');
+          if (!dctx || typeof dc.transferToImageBitmap !== 'function') throw new Error('no-offscreen');
+          drawDeskewed(dctx, bmp, bmp.width, bmp.height, ns.w, ns.h, msg.angle);
+          bmp.close();
+          var out = dc.transferToImageBitmap();
+          self.postMessage({ id: msg.id, ok: true, bitmap: out }, [out]);
         } else {
           var r = msg.rect, c = new OffscreenCanvas(r.w, r.h), ctx = c.getContext('2d');
           if (!ctx || typeof c.convertToBlob !== 'function') throw new Error('no-offscreen');
@@ -114,7 +122,7 @@
     try {
       if (typeof Worker === 'undefined' || typeof OffscreenCanvas === 'undefined' || typeof createImageBitmap !== 'function') throw new Error('unsupported');
       if (!poolUrl) {
-        var src = [accumulateStrip, toSuffix, buildHistograms, applyRotation, workerMain]
+        var src = [accumulateStrip, toSuffix, buildHistograms, applyRotation, deskewSize, drawDeskewed, workerMain]
           .map(function (f) { return f.toString(); }).join('\n') + '\nworkerMain();';
         poolUrl = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
       }
@@ -334,6 +342,99 @@
     return { box: { x0: x0, y0: y0, x1: x1, y1: y1 }, applied: true, paperT: paperT };
   }
 
+  /* 자동 기울기 측정
+   * 내용 상자의 네 변마다, 가운데 70% 구간에서 "처음 만나는 내용 픽셀(3px 연속)" 위치를
+   * 줄마다 모아 직선을 맞춘다(Theil–Sen: 기울기 쌍의 중앙값이라 튀는 점에 강함).
+   * 점의 80% 이상이 직선에서 2px 안에 있으면 '곧은 변'으로 보고, 곧은 변들의 각도가
+   * 서로 맞으면 그 값을 기울기로 쓴다. 사진처럼 테두리가 곧은 내용만 보정되고,
+   * 들쭉날쭉한 문서 · 그림은 대개 0(보정 안 함)이 된다.
+   * 반환값: 시계 방향 기울기(도). 보정은 반대로 돌린다.
+   */
+  function estimateSkew(a, threshold, noiseLevel) {
+    var none = { angle: 0, edges: 0 };
+    var dm = a.dmap, W = a.w;
+    if (!dm) return none;
+    var box = computeContentBox(a, threshold, noiseLevel);
+    if (!box) return none;
+    var T = Math.max(1, Math.min(254, Math.round(threshold)));
+    var x0 = box.x0, y0 = box.y0, x1 = box.x1, y1 = box.y1;
+    var bw = x1 - x0 + 1, bh = y1 - y0 + 1;
+    if (bw < 60 || bh < 60) return none;
+    var depthX = Math.ceil(bw * 0.3), depthY = Math.ceil(bh * 0.3);
+    function solid(k, step) { return dm[k] > T && dm[k + step] > T && dm[k + 2 * step] > T; }
+    function samples(from, to) {
+      var n = Math.min(160, to - from + 1), out = [];
+      for (var i = 0; i < n; i++) out.push(Math.round(from + (to - from) * (n === 1 ? 0.5 : i / (n - 1))));
+      return out;
+    }
+    var rows = samples(y0 + Math.floor(bh * 0.15), y1 - Math.floor(bh * 0.15));
+    var cols = samples(x0 + Math.floor(bw * 0.15), x1 - Math.floor(bw * 0.15));
+    var L = [], R = [], Tp = [], B = [], i, j, k;
+    for (i = 0; i < rows.length; i++) {
+      var y = rows[i], base = y * W;
+      for (j = 0; j < depthX; j++) { k = base + x0 + j; if (x0 + j + 2 <= x1 && solid(k, 1)) { L.push(y, x0 + j); break; } }
+      for (j = 0; j < depthX; j++) { k = base + x1 - j; if (x1 - j - 2 >= x0 && solid(k, -1)) { R.push(y, x1 - j); break; } }
+    }
+    for (i = 0; i < cols.length; i++) {
+      var x = cols[i];
+      for (j = 0; j < depthY; j++) { if (y0 + j + 2 <= y1 && solid((y0 + j) * W + x, W)) { Tp.push(x, y0 + j); break; } }
+      for (j = 0; j < depthY; j++) { if (y1 - j - 2 >= y0 && solid((y1 - j) * W + x, -W)) { B.push(x, y1 - j); break; } }
+    }
+    function fit(pts) { // pts = [u0,v0,u1,v1,...], v ≈ m·u + c
+      var n = pts.length / 2;
+      if (n < 20) return null;
+      var slopes = [];
+      for (var p = 0; p < n; p++) {
+        for (var q = p + 1; q < n; q++) {
+          var du = pts[2 * q] - pts[2 * p];
+          if (du) slopes.push((pts[2 * q + 1] - pts[2 * p + 1]) / du);
+        }
+      }
+      if (!slopes.length) return null;
+      var m = median(slopes);
+      var cs = [];
+      for (p = 0; p < n; p++) cs.push(pts[2 * p + 1] - m * pts[2 * p]);
+      var c = median(cs), inl = 0;
+      for (p = 0; p < n; p++) if (Math.abs(pts[2 * p + 1] - (m * pts[2 * p] + c)) <= 2) inl++;
+      return { m: m, frac: inl / n };
+    }
+    function median(arr) {
+      var s = Float64Array.from(arr).sort(), h = s.length >> 1;
+      return s.length % 2 ? s[h] : (s[h - 1] + s[h]) / 2;
+    }
+    var DEG = 180 / Math.PI, good = [];
+    var fl = fit(L), fr = fit(R), ft = fit(Tp), fb = fit(B);
+    // 세로 변: x = m·y + c → 시계 방향 θ이면 m = −tanθ / 가로 변: y = m·x + c → m = tanθ
+    if (fl && fl.frac >= 0.8) good.push({ a: -Math.atan(fl.m) * DEG, f: fl.frac });
+    if (fr && fr.frac >= 0.8) good.push({ a: -Math.atan(fr.m) * DEG, f: fr.frac });
+    if (ft && ft.frac >= 0.8) good.push({ a: Math.atan(ft.m) * DEG, f: ft.frac });
+    if (fb && fb.frac >= 0.8) good.push({ a: Math.atan(fb.m) * DEG, f: fb.frac });
+    if (!good.length) return none;
+    var mid = median(good.map(function (g) { return g.a; }));
+    var agree = good.filter(function (g) { return Math.abs(g.a - mid) <= 0.3; });
+    if (agree.length < 2 && !(agree.length === 1 && agree[0].f >= 0.9 && good.length === 1)) return none;
+    var sum = 0, wsum = 0;
+    agree.forEach(function (g) { sum += g.a * g.f; wsum += g.f; });
+    var angle = sum / wsum;
+    if (!(Math.abs(angle) <= 15)) return none;
+    return { angle: angle, edges: agree.length };
+  }
+
+  // 기울기 보정 후 캔버스 크기와 그리기(워커와 메인 스레드가 함께 쓴다 — 바깥 변수 참조 금지)
+  function deskewSize(w, h, deg) {
+    var r = deg * Math.PI / 180, c = Math.abs(Math.cos(r)), s = Math.abs(Math.sin(r));
+    return { w: Math.ceil(w * c + h * s), h: Math.ceil(w * s + h * c) };
+  }
+  function drawDeskewed(ctx, src, w, h, nw, nh, deg) {
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, nw, nh);
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.translate(nw / 2, nh / 2);
+    ctx.rotate(-deg * Math.PI / 180); // 시계 방향으로 기운 만큼 반대로
+    ctx.drawImage(src, -w / 2, -h / 2);
+  }
+
   function rotatedSize(w, h, rot) {
     return (rot === 90 || rot === 270) ? { w: h, h: w } : { w: w, h: h };
   }
@@ -423,18 +524,38 @@
     }).then(function (r) { return r.blob; }, onMain);
   }
 
+  // 원본을 기울기만큼 반대로 돌린 새 ImageBitmap(바깥은 흰색). 워커에서, 안 되면 메인 스레드에서.
+  function deskewBitmap(bitmap, deg) {
+    var onMain = function () {
+      var ns = deskewSize(bitmap.width, bitmap.height, deg);
+      var c = makeCanvas(ns.w, ns.h), ctx = c.getContext('2d');
+      if (!ctx || c.width !== ns.w) return Promise.reject(new Error('canvas-too-large'));
+      drawDeskewed(ctx, bitmap, bitmap.width, bitmap.height, ns.w, ns.h, deg);
+      return createImageBitmap(c).then(function (b) { c.width = c.height = 0; return b; });
+    };
+    if (!isBitmap(bitmap) || !workersAvailable()) return onMain();
+    return createImageBitmap(bitmap).then(function (copy) {
+      return runJob({ type: 'deskew', bitmap: copy, angle: deg }, [copy]);
+    }).then(function (r) { return r.bitmap; }, onMain);
+  }
+
   function outputName(original, format) {
     var base = (original || 'image').replace(/\.[^./\\]+$/, '') || 'image';
     return base + '_crop.' + (format === 'png' ? 'png' : 'jpg');
   }
 
-  var DEFAULTS = { threshold: 40, noise: 5, padding: 0, trim: true, rotation: 0, format: 'jpeg', quality: 92 };
+  var DEFAULTS = { threshold: 40, noise: 5, padding: 0, trim: true, deskew: true, rotation: 0, format: 'jpeg', quality: 92 };
+  var DESKEW_MIN = 0.1; // 이보다 작은 기울기(도)는 보간 손실이 더 커서 그대로 둔다
 
   window.WhiteCrop = {
     DEFAULTS: DEFAULTS,
     analyzeBitmap: analyzeBitmap,
     computeContentBox: computeContentBox,
     refineBox: refineBox,
+    estimateSkew: estimateSkew,
+    deskewBitmap: deskewBitmap,
+    deskewSize: deskewSize,
+    DESKEW_MIN: DESKEW_MIN,
     noiseMinCount: noiseMinCount,
     rotatedSize: rotatedSize,
     rotateBox: rotateBox,
@@ -473,6 +594,7 @@
     noiseOut: $('#out-noise'),
     padding: $('#opt-padding'),
     trim: $('#opt-trim'),
+    deskew: $('#opt-deskew'),
     quality: $('#opt-quality'),
     qualityOut: $('#out-quality'),
     qualityRow: $('#quality-row'),
@@ -490,6 +612,7 @@
     el.noiseOut.textContent = opts.noise === 0 ? '끔' : opts.noise + ' (' + (opts.noise / 10).toFixed(1) + '%)';
     el.padding.value = opts.padding;
     el.trim.checked = !!opts.trim;
+    el.deskew.checked = !!opts.deskew;
     el.quality.value = opts.quality;
     el.qualityOut.textContent = opts.quality;
     el.qualityRow.hidden = opts.format !== 'jpeg';
@@ -512,10 +635,10 @@
   }
 
   el.threshold.addEventListener('input', function () {
-    opts.threshold = Number(el.threshold.value); syncOptionUI(); scheduleRedrawAll();
+    opts.threshold = Number(el.threshold.value); syncOptionUI(); scheduleRedrawAll(); scheduleDeskew();
   });
   el.noise.addEventListener('input', function () {
-    opts.noise = Number(el.noise.value); syncOptionUI(); scheduleRedrawAll();
+    opts.noise = Number(el.noise.value); syncOptionUI(); scheduleRedrawAll(); scheduleDeskew();
   });
   el.padding.addEventListener('input', function () {
     var v = Math.floor(Number(el.padding.value));
@@ -525,6 +648,9 @@
   el.padding.addEventListener('change', syncOptionUI);
   el.trim.addEventListener('change', function () {
     opts.trim = el.trim.checked; scheduleRedrawAll();
+  });
+  el.deskew.addEventListener('change', function () {
+    opts.deskew = el.deskew.checked; scheduleDeskew(0);
   });
   el.quality.addEventListener('input', function () {
     opts.quality = Number(el.quality.value); syncOptionUI();
@@ -544,7 +670,7 @@
   el.reset.addEventListener('click', function () {
     var rot = opts.rotation;
     opts = Object.assign({}, DEFAULTS, { rotation: rot });
-    syncOptionUI(); scheduleRedrawAll();
+    syncOptionUI(); scheduleRedrawAll(); scheduleDeskew(0);
   });
 
   /* 파일 받기: 선택 · 드래그앤드롭 · 붙여넣기 */
@@ -626,6 +752,11 @@
       previewRot: null,   // 현재 회전을 적용한 축소본
       previewRotFor: null,
       plan: null,
+      base: null,
+      state: null,
+      skewCache: new Map(),
+      skewToken: 0,
+      skewBusy: false,
       error: null,
       node: node,
       ui: {
@@ -674,38 +805,107 @@
     });
   }
 
+  // 미리보기용 축소본(긴 변 PREVIEW_MAX). 가능하면 브라우저 내부 스레드에서 비동기로 줄인다.
+  function makePreview(bmp) {
+    var w = bmp.width || bmp.naturalWidth, h = bmp.height || bmp.naturalHeight;
+    var s = Math.min(1, PREVIEW_MAX / Math.max(w, h));
+    var pw = Math.max(1, Math.round(w * s)), ph = Math.max(1, Math.round(h * s));
+    var small = (isBitmap(bmp) && s < 1)
+      ? createImageBitmap(bmp, { resizeWidth: pw, resizeHeight: ph, resizeQuality: 'high' }).catch(function () { return null; })
+      : Promise.resolve(null);
+    return small.then(function (sm) {
+      var pc = makeCanvas(pw, ph), pctx = pc.getContext('2d');
+      pctx.fillStyle = '#fff'; pctx.fillRect(0, 0, pw, ph);
+      pctx.imageSmoothingQuality = 'high';
+      pctx.drawImage(sm || bmp, 0, 0, pw, ph);
+      closeBitmap(sm);
+      return { canvas: pc, scale: s };
+    });
+  }
+
+  // 화면 · 출력에 쓰는 '현재 상태'(원본 또는 기울기 보정본)를 바꾼다.
+  function applyState(it, st) {
+    it.state = st;
+    it.bitmap = st.bitmap; it.w = st.w; it.h = st.h;
+    it.analysis = st.analysis;
+    it.preview = st.preview; it.previewScale = st.previewScale;
+    it.previewRot = null;
+    updateItem(it);
+  }
+
+  /* 자동 기울기: 원본 분석에서 각도를 재고, 필요하면 보정본을 만들어 다시 분석한다.
+   * 각도별 보정본은 최근 2개까지 캐시(임계값을 움직여도 각도가 같으면 다시 만들지 않음). */
+  function wantedAngle(it) {
+    if (!opts.deskew || !it.base || !it.base.analysis) return 0;
+    var sk = estimateSkew(it.base.analysis, opts.threshold, opts.noise);
+    return Math.abs(sk.angle) >= DESKEW_MIN ? Math.round(sk.angle * 100) / 100 : 0;
+  }
+
+  function syncDeskew(it) {
+    if (it.removed || !it.base || !it.base.analysis) return Promise.resolve();
+    var want = wantedAngle(it);
+    var cur = it.state ? it.state.angle : null;
+    if (cur !== null && (cur === want || (cur && want && Math.abs(cur - want) < 0.05))) return Promise.resolve();
+    var token = ++it.skewToken;
+    if (!want) { it.skewBusy = false; applyState(it, it.base); return Promise.resolve(); }
+    var cached = it.skewCache.get(want);
+    if (cached) { it.skewBusy = false; applyState(it, cached); return Promise.resolve(); }
+    it.skewBusy = true;
+    if (it.state) updateItem(it);
+    return deskewBitmap(it.base.bitmap, want).then(function (db) {
+      if (it.removed || token !== it.skewToken) { closeBitmap(db); return; }
+      return Promise.all([analyzeBitmap(db), makePreview(db)]).then(function (res) {
+        if (it.removed || token !== it.skewToken) { closeBitmap(db); return; }
+        var st = { bitmap: db, w: db.width, h: db.height, analysis: res[0], preview: res[1].canvas, previewScale: res[1].scale, angle: want };
+        it.skewCache.set(want, st);
+        if (it.skewCache.size > 2) {
+          var oldest = it.skewCache.keys().next().value, old = it.skewCache.get(oldest);
+          it.skewCache.delete(oldest);
+          if (old !== it.state) closeBitmap(old.bitmap);
+        }
+        it.skewBusy = false;
+        applyState(it, st);
+      });
+    }).catch(function () {
+      if (it.removed || token !== it.skewToken) return;
+      it.skewBusy = false;
+      applyState(it, it.base); // 보정에 실패하면 원본으로
+    });
+  }
+
+  var skewTimer = 0;
+  function scheduleDeskew(delay) {
+    clearTimeout(skewTimer);
+    skewTimer = setTimeout(function () { items.forEach(syncDeskew); }, delay == null ? 250 : delay);
+  }
+
   function loadItem(it) {
     decode(it.file).then(function (bmp) {
       if (it.removed) { closeBitmap(bmp); return; }
-      it.bitmap = bmp;
       var w = bmp.width || bmp.naturalWidth, h = bmp.height || bmp.naturalHeight;
-      it.w = w; it.h = h;
-      var s = Math.min(1, PREVIEW_MAX / Math.max(w, h));
-      var pw = Math.max(1, Math.round(w * s)), ph = Math.max(1, Math.round(h * s));
+      var base = { bitmap: bmp, w: w, h: h, analysis: null, preview: null, previewScale: 1, angle: 0 };
+      it.base = base;
+      it.bitmap = bmp; it.w = w; it.h = h;
       setItemMsg(it, '여백 분석 중…', 'info');
-      // 분석(워커 풀)과 미리보기 축소(브라우저 내부 스레드)를 동시에 시작한다.
+      // 분석(워커 풀)과 미리보기 축소를 동시에 시작한다.
       var t0 = performance.now();
       var analysis = analyzeBitmap(bmp);
-      var small = (isBitmap(bmp) && s < 1)
-        ? createImageBitmap(bmp, { resizeWidth: pw, resizeHeight: ph, resizeQuality: 'high' }).catch(function () { return null; })
-        : Promise.resolve(null);
-      return small.then(function (sm) {
-        if (it.removed) { closeBitmap(sm); return analysis; }
-        var pc = makeCanvas(pw, ph), pctx = pc.getContext('2d');
-        pctx.fillStyle = '#fff'; pctx.fillRect(0, 0, pw, ph);
-        pctx.imageSmoothingQuality = 'high';
-        pctx.drawImage(sm || bmp, 0, 0, pw, ph);
-        closeBitmap(sm);
-        it.preview = pc;
-        it.previewScale = s;
+      return makePreview(bmp).then(function (pv) {
+        base.preview = pv.canvas; base.previewScale = pv.scale;
+        if (it.removed) return analysis;
+        it.preview = pv.canvas; it.previewScale = pv.scale;
         updateItem(it); // 분석이 끝나기 전에도 원본은 먼저 보여 준다
         return analysis;
       }).then(function (a) {
         if (it.removed) return;
-        it.analysis = a;
+        base.analysis = a;
         it.analyzeMs = performance.now() - t0;
-        it.node.classList.remove('is-loading');
-        updateItem(it);
+        return syncDeskew(it).then(function () {
+          if (it.removed) return;
+          if (!it.state) applyState(it, base);
+          it.node.classList.remove('is-loading');
+          updateItem(it);
+        });
       });
     }).catch(function (err) {
       if (it.removed) return;
@@ -722,7 +922,9 @@
 
   function removeItem(it) {
     it.removed = true;
-    closeBitmap(it.bitmap);
+    if (it.base) closeBitmap(it.base.bitmap);
+    it.skewCache.forEach(function (st) { closeBitmap(st.bitmap); });
+    it.skewCache.clear();
     it.node.remove();
     items = items.filter(function (x) { return x !== it; });
     refreshToolbar();
@@ -767,7 +969,8 @@
     var octx = oc.getContext('2d');
     octx.setTransform(1, 0, 0, 1, 0, 0);
     octx.drawImage(pr, 0, 0);
-    it.ui.origCap.textContent = '원본 · ' + rs.w + '×' + rs.h;
+    var od = rotatedSize(it.base ? it.base.w : it.w, it.base ? it.base.h : it.h, it.rot);
+    it.ui.origCap.textContent = '원본 · ' + od.w + '×' + od.h;
 
     if (!it.analysis) {
       it.ui.res.width = 1; it.ui.res.height = 1;
@@ -829,12 +1032,15 @@
     }
     it.ui.resCap.textContent = '결과 · ' + r.w + '×' + r.h;
 
+    var angle = it.state ? it.state.angle : 0;
     if (plan.empty) {
       setItemMsg(it, '내용을 찾지 못해 원본을 그대로 둡니다. 임계값을 낮춰 보세요.', 'warn');
-    } else if (r.x === 0 && r.y === 0 && r.w === rs.w && r.h === rs.h) {
-      setItemMsg(it, '잘라낼 흰 여백이 없습니다.', 'info');
     } else {
-      setItemMsg(it, '', null);
+      var notes = [];
+      if (it.skewBusy) notes.push('기울기 보정 중…');
+      else if (angle) notes.push('기울기 ' + (angle > 0 ? '+' : '') + angle.toFixed(2) + '° 자동 보정');
+      if (r.x === 0 && r.y === 0 && r.w === rs.w && r.h === rs.h) notes.push('잘라낼 흰 여백이 없습니다.');
+      setItemMsg(it, notes.join(' · '), notes.length ? 'info' : null);
     }
     it.ui.download.disabled = false;
     refreshToolbar();
