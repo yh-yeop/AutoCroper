@@ -49,6 +49,15 @@ h1 { margin: 0; font-size: 1.4rem; letter-spacing: -0.01em; }
 .title-row { display: flex; align-items: center; justify-content: space-between; gap: 8px 12px; flex-wrap: wrap; }
 .install { padding: 6px 12px; font-size: 0.88rem; }
 .install[hidden] { display: none; }
+.head-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+a.install { text-decoration: none; color: inherit; display: inline-block; }
+.folder { margin: 0 0 6px; font-size: 0.85rem; color: var(--muted); word-break: break-all; }
+.folder.is-set { color: var(--text); font-weight: 600; }
+.btn-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.small { padding: 5px 10px; font-size: 0.85rem; }
+.check.sub { margin-top: 8px; font-weight: 500; font-size: 0.88rem; }
+.check input:disabled + * , .check:has(input:disabled) { opacity: 0.55; }
+[hidden] { display: none !important; }
 .privacy {
   display: inline-flex; align-items: center; gap: 6px;
   margin: 10px 0 0; padding: 6px 10px;
@@ -135,7 +144,8 @@ figcaption { margin-top: 4px; font-size: 0.8rem; color: var(--muted); font-varia
 .card-msg { margin: 10px 0 0; padding: 7px 10px; border-radius: 6px; font-size: 0.85rem; }
 .card-msg.is-warn { background: var(--warn-bg); color: var(--warn-text); }
 .card-msg.is-info { color: var(--info-text); padding: 0; }
-.card-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 10px; }
+.card-actions { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+.card-part { color: var(--accent); font-weight: 600; margin-left: 4px; }
 .rotate { display: flex; align-items: center; gap: 6px; }
 .rot-label { min-width: 3ch; text-align: center; font-variant-numeric: tabular-nums; color: var(--muted); }
 

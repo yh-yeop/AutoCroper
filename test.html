@@ -459,10 +459,10 @@
         detail: (WC.usingWorker() ? '워커' : '메인') + ' ' + boxStr(a.plan.box) + ' / 메인 ' + boxStr(b.plan.box) };
     });
 
-    test('파일 이름: 원본이름_crop.확장자', async function () {
-      var cases = [['scan 01.jpeg', 'jpeg', 'scan 01_crop.jpg'], ['a.b.png', 'png', 'a.b_crop.png'], ['noext', 'png', 'noext_crop.png'], ['사진.HEIC.jpg', 'jpeg', '사진.HEIC_crop.jpg']];
-      var bad = cases.filter(function (k) { return WC.outputName(k[0], k[1]) !== k[2]; });
-      return { pass: !bad.length, detail: cases.map(function (k) { return k[0] + ' → ' + WC.outputName(k[0], k[1]); }).join(' · ') };
+    test('파일 이름: 원본이름_crop.확장자 (분리 시 _번호)', async function () {
+      var cases = [['scan 01.jpeg', 'jpeg', 'scan 01_crop.jpg'], ['a.b.png', 'png', 'a.b_crop.png'], ['noext', 'png', 'noext_crop.png'], ['사진.HEIC.jpg', 'jpeg', '사진.HEIC_crop.jpg'], ['앨범.jpg', 'jpeg', '앨범_crop_3.jpg', 3]];
+      var bad = cases.filter(function (k) { return WC.outputName(k[0], k[1], k[3]) !== k[2]; });
+      return { pass: !bad.length, detail: cases.map(function (k) { return k[0] + (k[3] ? '(' + k[3] + '번째)' : '') + ' → ' + WC.outputName(k[0], k[1], k[3]); }).join(' · ') };
     });
 
     /* ── 실행 ── */

@@ -539,12 +539,13 @@
     }).then(function (r) { return r.bitmap; }, onMain);
   }
 
-  function outputName(original, format) {
+  // 원본이름_crop.확장자 (한 파일에서 여러 장으로 분리한 경우 원본이름_crop_번호.확장자)
+  function outputName(original, format, index) {
     var base = (original || 'image').replace(/\.[^./\\]+$/, '') || 'image';
-    return base + '_crop.' + (format === 'png' ? 'png' : 'jpg');
+    return base + '_crop' + (index ? '_' + index : '') + '.' + (format === 'png' ? 'png' : 'jpg');
   }
 
-  var DEFAULTS = { threshold: 40, noise: 5, padding: 0, trim: true, deskew: true, rotation: 0, format: 'jpeg', quality: 92 };
+  var DEFAULTS = { threshold: 40, noise: 5, padding: 0, trim: true, deskew: true, split: true, autoSave: false, rotation: 0, format: 'jpeg', quality: 92 };
   var DESKEW_MIN = 0.1; // 이보다 작은 기울기(도)는 보간 손실이 더 커서 그대로 둔다
 
   window.WhiteCrop = {
@@ -575,8 +576,27 @@
   var PREVIEW_MAX = 1000; // 미리보기 캔버스 최대 변 길이(px)
   var $ = function (sel, root) { return (root || document).querySelector(sel); };
 
-  var opts = Object.assign({}, DEFAULTS);
+  var native = (window.autocroperNative && window.autocroperNative.isDesktop) ? window.autocroperNative : null;
+  var SETTINGS_KEY = 'autocroper.settings.v1';
+  var opts = Object.assign({}, DEFAULTS, loadSettings());
   var items = [];
+
+  // 옵션은 이 기기에 기억해 두고 다음에 그대로 쓴다(회전은 매번 0°부터).
+  function loadSettings() {
+    try {
+      var o = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}'), out = {};
+      Object.keys(DEFAULTS).forEach(function (k) {
+        if (k !== 'rotation' && o[k] !== undefined && typeof o[k] === typeof DEFAULTS[k]) out[k] = o[k];
+      });
+      return out;
+    } catch (_) { return {}; }
+  }
+  function saveSettings() {
+    try {
+      var o = Object.assign({}, opts); delete o.rotation;
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify(o));
+    } catch (_) { /* 저장 못 해도 동작에는 지장 없음 */ }
+  }
   var itemSeq = 0;
 
   var el = {
@@ -599,6 +619,16 @@
     qualityOut: $('#out-quality'),
     qualityRow: $('#quality-row'),
     reset: $('#reset-btn'),
+    split: $('#opt-split'),
+    autoSave: $('#opt-autosave'),
+    saveOpt: $('#save-opt'),
+    saveFolder: $('#save-folder'),
+    saveHint: $('#save-hint'),
+    pickFolder: $('#pick-folder-btn'),
+    openFolder: $('#open-folder-btn'),
+    clearFolder: $('#clear-folder-btn'),
+    saveAll: $('#save-all-btn'),
+    exeLink: $('#exe-link'),
     tpl: $('#card-tpl')
   };
 
@@ -613,6 +643,8 @@
     el.padding.value = opts.padding;
     el.trim.checked = !!opts.trim;
     el.deskew.checked = !!opts.deskew;
+    el.split.checked = !!opts.split;
+    el.autoSave.checked = !!opts.autoSave;
     el.quality.value = opts.quality;
     el.qualityOut.textContent = opts.quality;
     el.qualityRow.hidden = opts.format !== 'jpeg';
@@ -622,6 +654,7 @@
     document.querySelectorAll('[data-format]').forEach(function (b) {
       b.setAttribute('aria-pressed', String(b.dataset.format === opts.format));
     });
+    saveSettings();
   }
 
   var redrawQueued = false;
@@ -643,14 +676,23 @@
   el.padding.addEventListener('input', function () {
     var v = Math.floor(Number(el.padding.value));
     opts.padding = isFinite(v) && v > 0 ? Math.min(v, 2000) : 0;
-    scheduleRedrawAll();
+    scheduleRedrawAll(); saveSettings();
   });
   el.padding.addEventListener('change', syncOptionUI);
   el.trim.addEventListener('change', function () {
-    opts.trim = el.trim.checked; scheduleRedrawAll();
+    opts.trim = el.trim.checked; syncOptionUI(); scheduleRedrawAll();
   });
   el.deskew.addEventListener('change', function () {
-    opts.deskew = el.deskew.checked; scheduleDeskew(0);
+    opts.deskew = el.deskew.checked; syncOptionUI(); scheduleDeskew(0);
+  });
+  el.split.addEventListener('change', function () {
+    opts.split = el.split.checked; syncOptionUI();
+    if (opts.split) items.slice().forEach(function (it) { if (!it.group && it.base && it.base.analysis) maybeSplit(it); });
+    else groupsOf(items).forEach(function (g) { unsplitGroup(g, false); });
+  });
+  el.autoSave.addEventListener('change', function () {
+    opts.autoSave = el.autoSave.checked; syncOptionUI();
+    if (opts.autoSave) items.forEach(maybeAutoSave);
   });
   el.quality.addEventListener('input', function () {
     opts.quality = Number(el.quality.value); syncOptionUI();
@@ -668,8 +710,8 @@
     });
   });
   el.reset.addEventListener('click', function () {
-    var rot = opts.rotation;
-    opts = Object.assign({}, DEFAULTS, { rotation: rot });
+    var rot = opts.rotation, keep = { autoSave: opts.autoSave };
+    opts = Object.assign({}, DEFAULTS, keep, { rotation: rot });
     syncOptionUI(); scheduleRedrawAll(); scheduleDeskew(0);
   });
 
@@ -738,13 +780,155 @@
     if (skipped) setStatus('이미지가 아닌 파일 ' + skipped + '개는 건너뛰었습니다.');
   }
 
-  /* 이미지 항목 */
-  function addItem(file) {
+  /* 저장 폴더
+   * 데스크톱 앱: 기본 폴더 선택 창 + 파일 쓰기(설정에 기억)
+   * 브라우저(Edge · Chrome): 폴더 접근 기능(showDirectoryPicker), 폴더 핸들은 IndexedDB에 기억
+   * 둘 다 안 되면 지금처럼 다운로드 · ZIP */
+  var saveTarget = null; // { kind: 'native', path, label } | { kind: 'fsa', handle, label }
+  var canPickFolder = !!native || typeof window.showDirectoryPicker === 'function';
+  var savedNames = new Map(); // 이번 실행에서 폴더에 쓴 이름 → 항목 id (서로 덮어쓰지 않도록)
+
+  function idb(mode, fn) {
+    return new Promise(function (resolve, reject) {
+      var req = indexedDB.open('autocroper', 1);
+      req.onupgradeneeded = function () { req.result.createObjectStore('kv'); };
+      req.onerror = function () { reject(req.error); };
+      req.onsuccess = function () {
+        try {
+          var tx = req.result.transaction('kv', mode), st = tx.objectStore('kv'), r = fn(st);
+          tx.oncomplete = function () { resolve(r && r.result); req.result.close(); };
+          tx.onerror = function () { reject(tx.error); req.result.close(); };
+        } catch (err) { reject(err); req.result.close(); }
+      };
+    });
+  }
+
+  function setSaveTarget(t) {
+    saveTarget = t;
+    el.saveFolder.textContent = t ? t.label : '지정 안 함 · 다운로드 폴더로 받기';
+    el.saveFolder.classList.toggle('is-set', !!t);
+    el.openFolder.hidden = !(t && t.kind === 'native');
+    el.clearFolder.hidden = !t;
+    el.autoSave.disabled = !t;
+    el.saveAll.hidden = !t;
+    el.zip.className = t ? 'ghost' : 'primary';
+    items.forEach(function (it) { it.ui.download.textContent = t ? '저장' : '다운로드'; });
+    refreshToolbar();
+  }
+
+  function initSaveFolder() {
+    if (!canPickFolder) {
+      el.pickFolder.hidden = true;
+      el.autoSave.closest('label').hidden = true;
+      el.saveHint.textContent = '이 브라우저는 폴더에 바로 저장하는 기능을 지원하지 않습니다. Edge · Chrome이나 Windows 설치 파일을 쓰면 폴더에 바로 저장할 수 있습니다.';
+      setSaveTarget(null);
+      return;
+    }
+    setSaveTarget(null);
+    if (native) {
+      native.getSaveFolder().then(function (p) { if (p) setSaveTarget({ kind: 'native', path: p, label: p }); });
+    } else if (window.indexedDB) {
+      idb('readonly', function (st) { return st.get('saveDir'); }).then(function (h) {
+        if (h && h.kind === 'directory') setSaveTarget({ kind: 'fsa', handle: h, label: h.name + ' (브라우저 폴더)' });
+      }).catch(function () {});
+    }
+  }
+
+  el.pickFolder.addEventListener('click', function () {
+    if (native) {
+      native.chooseFolder().then(function (p) { if (p) { setSaveTarget({ kind: 'native', path: p, label: p }); setStatus('저장 폴더: ' + p); } });
+      return;
+    }
+    window.showDirectoryPicker({ id: 'autocroper-out', mode: 'readwrite' }).then(function (h) {
+      setSaveTarget({ kind: 'fsa', handle: h, label: h.name + ' (브라우저 폴더)' });
+      setStatus('저장 폴더: ' + h.name);
+      if (window.indexedDB) idb('readwrite', function (st) { return st.put(h, 'saveDir'); }).catch(function () {});
+    }).catch(function () { /* 취소 */ });
+  });
+  el.openFolder.addEventListener('click', function () { if (native && saveTarget) native.openFolder(saveTarget.path); });
+  el.clearFolder.addEventListener('click', function () {
+    setSaveTarget(null);
+    opts.autoSave = false; syncOptionUI();
+    if (native) { /* 데스크톱은 다음 선택 때 덮어씀 */ }
+    else if (window.indexedDB) idb('readwrite', function (st) { return st.delete('saveDir'); }).catch(function () {});
+  });
+
+  // 브라우저 폴더는 권한을 다시 물어야 할 수 있다(사용자가 누른 순간에만 물을 수 있음).
+  function ensurePermission(t, interactive) {
+    if (t.kind !== 'fsa') return Promise.resolve(true);
+    var o = { mode: 'readwrite' };
+    return t.handle.queryPermission(o).then(function (st) {
+      if (st === 'granted') return true;
+      if (!interactive) return false;
+      return t.handle.requestPermission(o).then(function (r) { return r === 'granted'; });
+    }).catch(function () { return false; });
+  }
+
+  function nameFor(it, used) {
+    var n = outputName(it.name, opts.format, it.part);
+    if (used) return uniqueName(n, used);
+    var owner = savedNames.get(n);
+    if (owner === undefined || owner === it.id) { savedNames.set(n, it.id); return n; }
+    var dot = n.lastIndexOf('.');
+    for (var k = 2; ; k++) {
+      var cand = n.slice(0, dot) + ' (' + k + ')' + n.slice(dot), o2 = savedNames.get(cand);
+      if (o2 === undefined || o2 === it.id) { savedNames.set(cand, it.id); return cand; }
+    }
+  }
+
+  function writeToFolder(t, name, blob) {
+    if (t.kind === 'native') {
+      return blob.arrayBuffer().then(function (buf) { return native.saveFile(t.path, name, buf); }).then(function (r) {
+        if (!r || !r.ok) throw new Error((r && r.error) || '저장 실패');
+        return r.path || name;
+      });
+    }
+    return t.handle.getFileHandle(name, { create: true }).then(function (fh) {
+      return fh.createWritable().then(function (w) {
+        return w.write(blob).then(function () { return w.close(); });
+      });
+    }).then(function () { return name; });
+  }
+
+  function saveItem(it, interactive, used) {
+    var t = saveTarget;
+    return ensurePermission(t, interactive).then(function (ok) {
+      if (!ok) throw new Error('폴더 쓰기 권한이 없습니다. "폴더에 모두 저장"을 눌러 허용해 주세요.');
+      return makeBlob(it);
+    }).then(function (blob) {
+      return writeToFolder(t, nameFor(it, used), blob);
+    }).then(function (path) {
+      it.saved = true;
+      return path;
+    });
+  }
+
+  // 처리되면 바로 저장(한 항목당 한 번). 옵션을 바꾼 뒤 다시 저장하려면 '저장' · '폴더에 모두 저장'.
+  function maybeAutoSave(it) {
+    if (!opts.autoSave || !saveTarget || it.saved || it.autoSaving || !it.plan || it.error || it.removed || it.skewBusy) return;
+    it.autoSaving = true;
+    saveItem(it, false).then(function (path) {
+      setItemMsg(it, '저장됨: ' + path, 'info');
+    }).catch(function (err) {
+      setItemMsg(it, errText(err), 'warn');
+    }).then(function () { it.autoSaving = false; });
+  }
+
+  /* 이미지 항목
+   * src.file: 사용자가 넣은 파일 / src.bitmap(Promise 가능): 분리된 사진 또는 분리 취소로 되돌린 원본
+   * src.group · part · count: 한 파일에서 나온 여러 장 중 몇 번째인지 */
+  function addItem(file, src) {
+    src = src || {};
     var node = el.tpl.content.firstElementChild.cloneNode(true);
     var it = {
       id: ++itemSeq,
       file: file,
-      name: file.displayName || file.name || 'image.png',
+      src: src,
+      name: src.name || (file && (file.displayName || file.name)) || 'image.png',
+      group: src.group || null,
+      part: src.part || 0,
+      count: src.count || 0,
+      noSplit: !!src.noSplit,
       rot: opts.rotation,
       bitmap: null,
       analysis: null,
@@ -757,6 +941,7 @@
       skewCache: new Map(),
       skewToken: 0,
       skewBusy: false,
+      saved: false,
       error: null,
       node: node,
       ui: {
@@ -767,21 +952,53 @@
         resCap: $('.cap-res', node),
         msg: $('.card-msg', node),
         rotLabel: $('.rot-label', node),
-        download: $('.dl-btn', node)
+        download: $('.dl-btn', node),
+        unsplit: $('.unsplit-btn', node)
       }
     };
     it.ui.name.textContent = it.name;
     it.ui.name.title = it.name;
+    if (it.part) {
+      var tag = document.createElement('span');
+      tag.className = 'card-part';
+      tag.textContent = it.part + ' / ' + it.count;
+      it.ui.name.appendChild(tag);
+      it.ui.unsplit.hidden = false;
+      it.ui.unsplit.addEventListener('click', function () { unsplitGroup(it.group, true); });
+      it.group.children.push(it);
+    }
     node.classList.add('is-loading');
+    setItemMsg(it, '차례를 기다리는 중…', 'info');
     $('.rm-btn', node).addEventListener('click', function () { removeItem(it); });
     $('.rot-left', node).addEventListener('click', function () { setItemRotation(it, (it.rot + 270) % 360); });
     $('.rot-right', node).addEventListener('click', function () { setItemRotation(it, (it.rot + 90) % 360); });
     it.ui.download.addEventListener('click', function () { downloadOne(it); });
+    it.ui.download.textContent = saveTarget ? '저장' : '다운로드';
     it.ui.rotLabel.textContent = it.rot + '°';
-    items.push(it);
-    el.list.appendChild(node);
+    if (src.before && src.before.parentNode === el.list) {
+      el.list.insertBefore(node, src.before);
+      var at = items.indexOf(src.beforeItem);
+      if (at >= 0) items.splice(at, 0, it); else items.push(it);
+    } else {
+      el.list.appendChild(node);
+      items.push(it);
+    }
     refreshToolbar();
-    loadItem(it);
+    withLoadSlot(function () { return it.removed ? null : loadItem(it); });
+    return it;
+  }
+
+  /* 한꺼번에 많이 넣어도 동시에 펼치는 이미지는 (워커 수 + 1)장까지만: 메모리를 아끼고,
+   * 앞의 결과가 먼저 나오며, 전체도 덜 버벅인다. */
+  var LOAD_MAX = POOL_SIZE + 1, loadActive = 0, loadWait = [];
+  function withLoadSlot(fn) {
+    return new Promise(function (resolve) { loadWait.push(resolve); pumpLoad(); }).then(function () {
+      var release = function () { loadActive--; pumpLoad(); };
+      return Promise.resolve().then(fn).then(release, release);
+    });
+  }
+  function pumpLoad() {
+    while (loadActive < LOAD_MAX && loadWait.length) { loadActive++; loadWait.shift()(); }
   }
 
   function decode(file) {
@@ -880,7 +1097,8 @@
   }
 
   function loadItem(it) {
-    decode(it.file).then(function (bmp) {
+    var source = it.src.bitmap ? Promise.resolve(it.src.bitmap) : decode(it.file);
+    return source.then(function (bmp) {
       if (it.removed) { closeBitmap(bmp); return; }
       var w = bmp.width || bmp.naturalWidth, h = bmp.height || bmp.naturalHeight;
       var base = { bitmap: bmp, w: w, h: h, analysis: null, preview: null, previewScale: 1, angle: 0 };
@@ -889,7 +1107,7 @@
       setItemMsg(it, '여백 분석 중…', 'info');
       // 분석(워커 풀)과 미리보기 축소를 동시에 시작한다.
       var t0 = performance.now();
-      var analysis = analyzeBitmap(bmp);
+      var analysis = it.src.analysis ? Promise.resolve(it.src.analysis) : analyzeBitmap(bmp);
       return makePreview(bmp).then(function (pv) {
         base.preview = pv.canvas; base.previewScale = pv.scale;
         if (it.removed) return analysis;
@@ -900,11 +1118,13 @@
         if (it.removed) return;
         base.analysis = a;
         it.analyzeMs = performance.now() - t0;
+        if (maybeSplit(it)) return; // 여러 장이면 이 카드는 사진별 카드로 바뀐다
         return syncDeskew(it).then(function () {
           if (it.removed) return;
           if (!it.state) applyState(it, base);
           it.node.classList.remove('is-loading');
           updateItem(it);
+          maybeAutoSave(it);
         });
       });
     }).catch(function (err) {
@@ -920,14 +1140,61 @@
 
   function closeBitmap(b) { if (b && typeof b.close === 'function') b.close(); }
 
-  function removeItem(it) {
+  /* 여러 장 분리: 원본 분석에서 사진 영역을 찾아 2곳 이상이면 사진별 항목으로 바꾼다.
+   * 원본 비트맵 · 분석은 그룹에 남겨 두어 '분리 취소'하면 다시 분석하지 않고 되돌린다. */
+  function maybeSplit(it) {
+    if (!opts.split || it.noSplit || it.group || it.removed || !it.base || !it.base.analysis) return false;
+    if (typeof findPhotoRegions !== 'function' || typeof extractRegion !== 'function') return false;
+    var res;
+    try { res = findPhotoRegions(it.base.analysis, opts.threshold, {}); } catch (_) { return false; }
+    if (!res || !res.regions || res.regions.length < 2) return false;
+    var group = { name: it.name, file: it.file, bitmap: it.base.bitmap, analysis: it.base.analysis, children: [] };
+    var n = res.regions.length;
+    for (var i = 0; i < n; i++) {
+      addItem(null, {
+        bitmap: extractRegion(it.base.bitmap, it.base.analysis, res, i, {}),
+        name: it.name, group: group, part: i + 1, count: n,
+        before: it.node, beforeItem: it
+      });
+    }
+    detachItem(it, false); // 원본 비트맵은 그룹이 가진다
+    setStatus(it.name + ': 사진 ' + n + '장을 찾아 나눴습니다.');
+    return true;
+  }
+
+  function unsplitGroup(group, byUser) {
+    var kids = group.children.filter(function (c) { return !c.removed; });
+    if (!kids.length) return;
+    var first = kids[0];
+    addItem(group.file, { bitmap: group.bitmap, analysis: group.analysis, name: group.name, noSplit: !!byUser, before: first.node, beforeItem: first });
+    group.children = [];
+    kids.forEach(function (c) { c.group = null; removeItem(c); });
+  }
+
+  function groupsOf(list) {
+    var gs = [];
+    list.forEach(function (it) { if (it.group && gs.indexOf(it.group) < 0) gs.push(it.group); });
+    return gs;
+  }
+
+  // keepBitmaps=false: 원본 비트맵은 남기고 카드만 뺀다
+  function detachItem(it, closeBase) {
     it.removed = true;
-    if (it.base) closeBitmap(it.base.bitmap);
+    if (closeBase && it.base) closeBitmap(it.base.bitmap);
     it.skewCache.forEach(function (st) { closeBitmap(st.bitmap); });
     it.skewCache.clear();
     it.node.remove();
     items = items.filter(function (x) { return x !== it; });
     refreshToolbar();
+  }
+
+  function removeItem(it) {
+    var g = it.group;
+    detachItem(it, true);
+    if (g) {
+      g.children = g.children.filter(function (c) { return c !== it; });
+      if (!g.children.length) closeBitmap(g.bitmap); // 마지막 조각까지 지우면 원본도 놓는다
+    }
   }
 
   el.clear.addEventListener('click', function () {
@@ -1062,9 +1329,9 @@
   }
 
   function errText(err) {
-    return err && err.message === 'canvas-too-large'
-      ? '이미지가 너무 커서 이 기기의 브라우저에서 결과를 만들 수 없습니다.'
-      : '결과를 만들지 못했습니다: ' + ((err && err.message) || err);
+    if (err && err.message === 'canvas-too-large') return '이미지가 너무 커서 이 기기의 브라우저에서 결과를 만들 수 없습니다.';
+    if (err && /권한/.test(err.message)) return err.message;
+    return '저장하지 못했습니다: ' + ((err && err.message) || err);
   }
 
   function downloadOne(it) {
@@ -1072,15 +1339,37 @@
     var btn = it.ui.download;
     btn.disabled = true;
     var label = btn.textContent;
-    btn.textContent = '만드는 중…';
-    makeBlob(it).then(function (blob) {
-      saveBlob(blob, outputName(it.name, opts.format));
-    }).catch(function (err) {
+    btn.textContent = saveTarget ? '저장 중…' : '만드는 중…';
+    var job = saveTarget
+      ? saveItem(it, true).then(function (path) { setItemMsg(it, '저장됨: ' + path, 'info'); })
+      : makeBlob(it).then(function (blob) { saveBlob(blob, outputName(it.name, opts.format, it.part)); });
+    job.catch(function (err) {
       setItemMsg(it, errText(err), 'warn');
     }).then(function () {
       btn.disabled = false; btn.textContent = label;
     });
   }
+
+  // 폴더에 모두 저장: 워커 풀이 코어 수만큼 동시에 그리고 인코딩, 다 된 것부터 바로 쓴다.
+  el.saveAll.addEventListener('click', function () {
+    var ready = items.filter(function (it) { return it.plan && !it.error; });
+    if (!ready.length || !saveTarget) return;
+    el.saveAll.disabled = true;
+    var done = 0, failed = 0, t0 = performance.now();
+    ensurePermission(saveTarget, true).then(function (ok) {
+      if (!ok) throw new Error('폴더 쓰기 권한이 없습니다.');
+      setStatus('저장 중… 0 / ' + ready.length);
+      return Promise.all(ready.map(function (it) {
+        return saveItem(it, false).catch(function (err) { failed++; setItemMsg(it, errText(err), 'warn'); }).then(function () {
+          done++; setStatus('저장 중… ' + done + ' / ' + ready.length);
+        });
+      }));
+    }).then(function () {
+      setStatus('폴더에 ' + (ready.length - failed) + '장 저장했습니다' + (failed ? ' (실패 ' + failed + '장)' : '') + ' · ' + ((performance.now() - t0) / 1000).toFixed(1) + '초');
+    }).catch(function (err) {
+      setStatus(errText(err));
+    }).then(function () { el.saveAll.disabled = false; refreshToolbar(); });
+  });
 
   function uniqueName(name, used) {
     if (!used.has(name)) { used.add(name); return name; }
@@ -1112,7 +1401,7 @@
       });
     }));
     blobs.forEach(function (b, i) {
-      if (b) zip.file(uniqueName(outputName(ready[i].name, format), used), b);
+      if (b) zip.file(uniqueName(outputName(ready[i].name, format, ready[i].part), used), b);
     });
     try {
       var out = await zip.generateAsync({ type: 'blob', compression: 'STORE' });
@@ -1128,7 +1417,9 @@
     var n = items.length;
     el.toolbar.hidden = n === 0;
     el.count.textContent = n + '장';
-    el.zip.disabled = !items.some(function (it) { return it.plan && !it.error; });
+    var any = items.some(function (it) { return it.plan && !it.error; });
+    el.zip.disabled = !any;
+    if (el.saveAll) el.saveAll.disabled = !any;
   }
 
   /* 설치형 앱(PWA): Windows · macOS · Android의 Edge/Chrome에서 '앱으로 설치' */
@@ -1157,13 +1448,33 @@
     });
   }
 
-  // 오프라인 캐시(서비스 워커). file:// 등 지원하지 않는 곳에선 조용히 건너뛴다.
-  if ('serviceWorker' in navigator && window.isSecureContext) {
+  // 데스크톱 앱: 탐색기 '연결 프로그램'으로 연 파일 받기, 웹 전용 버튼 숨기기
+  if (native) {
+    document.documentElement.classList.add('is-desktop');
+    if (el.exeLink) el.exeLink.hidden = true;
+    if (installBtn) installBtn.hidden = true;
+    if (typeof native.onOpenFiles === 'function') {
+      native.onOpenFiles(function (files) {
+        addFiles((files || []).map(function (f) {
+          try { return new File([f.data], f.name, { type: f.type || '' }); } catch (_) { return null; }
+        }).filter(Boolean));
+      });
+    }
+  } else if (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches && el.exeLink) {
+    el.exeLink.hidden = true; // 이미 설치형 웹앱으로 실행 중
+  }
+
+  // 오프라인 캐시(서비스 워커). 데스크톱 앱 · file:// 등에선 건너뛴다.
+  if (!native && 'serviceWorker' in navigator && window.isSecureContext) {
     window.addEventListener('load', function () {
       navigator.serviceWorker.register('sw.js').catch(function () { /* 무시 */ });
     });
   }
 
+  // 첫 이미지가 워커 시작을 기다리지 않도록 한가할 때 미리 띄워 둔다
+  (window.requestIdleCallback || function (f) { setTimeout(f, 300); })(function () { ensurePool(); });
+
+  initSaveFolder();
   syncOptionUI();
   refreshToolbar();
 })();

@@ -18,7 +18,10 @@
       <h1>흰 여백 자르기</h1>
       <div class="title-row">
         <p class="lead">스캔본 · 흰 배경 사진의 흰 여백을 자동으로 잘라 냅니다.</p>
-        <button type="button" id="install-btn" class="ghost install" hidden>앱으로 설치</button>
+        <span class="head-actions">
+          <a id="exe-link" class="ghost install" href="https://github.com/yh-yeop/AutoCroper/releases/latest">Windows 설치 파일 (.exe)</a>
+          <button type="button" id="install-btn" class="ghost install" hidden>앱으로 설치</button>
+        </span>
       </div>
       <p class="privacy">
         <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M12 2a5 5 0 0 0-5 5v3H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2h-1V7a5 5 0 0 0-5-5Zm-3 8V7a3 3 0 1 1 6 0v3H9Z"/></svg>
@@ -41,6 +44,7 @@
         <span class="grow"></span>
         <button type="button" id="clear-btn" class="ghost">모두 지우기</button>
         <button type="button" id="zip-btn" class="primary">전체 ZIP 다운로드</button>
+        <button type="button" id="save-all-btn" class="primary" hidden>폴더에 모두 저장</button>
       </div>
       <p id="status" class="status" role="status" aria-live="polite"></p>
 
@@ -48,6 +52,21 @@
     </section>
 
     <section class="options" aria-label="옵션">
+      <div class="opt" id="save-opt">
+        <div class="opt-head"><span>저장 폴더</span></div>
+        <p id="save-folder" class="folder">지정 안 함 · 다운로드 폴더로 받기</p>
+        <div class="btn-row">
+          <button type="button" id="pick-folder-btn" class="ghost small">폴더 선택</button>
+          <button type="button" id="open-folder-btn" class="ghost small" hidden>폴더 열기</button>
+          <button type="button" id="clear-folder-btn" class="link small" hidden>해제</button>
+        </div>
+        <label class="check sub"><input id="opt-autosave" type="checkbox"> 처리되면 바로 폴더에 저장</label>
+        <p id="save-hint" class="hint">폴더를 지정하면 ZIP 없이 결과 파일이 그 폴더에 바로 저장됩니다.</p>
+      </div>
+      <div class="opt">
+        <label class="check"><input id="opt-split" type="checkbox" checked> 여러 장 자동 분리</label>
+        <p class="hint">스캐너에 사진 여러 장을 한꺼번에 올려 스캔한 파일을 사진별로 나눕니다. 사진이 하나뿐이거나 문서면 그대로 둡니다.</p>
+      </div>
       <div class="opt">
         <div class="opt-head"><label for="opt-threshold">흰색 임계값</label><output id="out-threshold" for="opt-threshold">40</output></div>
         <input id="opt-threshold" type="range" min="5" max="120" step="1" value="40">
@@ -122,6 +141,8 @@
           <span class="rot-label">0°</span>
           <button type="button" class="icon rot-right" aria-label="오른쪽으로 90° 회전" title="오른쪽으로 회전">⟳</button>
         </div>
+        <span class="grow"></span>
+        <button type="button" class="link unsplit-btn" hidden>분리 취소</button>
         <button type="button" class="primary dl-btn" disabled>다운로드</button>
       </div>
     </article>
