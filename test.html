@@ -376,6 +376,57 @@
         detail: '반듯한 사진 ' + rp.est.angle.toFixed(2) + '° · 반듯한 문서 ' + rd.est.angle.toFixed(2) + '° · 3° 기운 문서 ' + (rt.angle ? rt.angle.toFixed(2) + '° 보정' : '보정 안 함') };
     });
 
+    // 사진 여러 장을 한 페이지에 (각도 · 크기 제각각)
+    function multiPage(specs) {
+      return canvas(2480, 3508, function (ctx) {
+        specs.forEach(function (p, i) {
+          ctx.save(); ctx.translate(p.cx, p.cy); ctx.rotate(p.a * Math.PI / 180);
+          drawPhoto(ctx, -p.w / 2, -p.h / 2, p.w, p.h, 60 + i); ctx.restore();
+        });
+      });
+    }
+    async function splitAll(page) {
+      var bmp = page instanceof ImageBitmap ? page : await bitmapOf(page);
+      var a = await WC.analyzeBitmap(bmp);
+      var t0 = performance.now();
+      var res = WC.findPhotoRegions(a, 40, {});
+      var ms = performance.now() - t0, outs = [];
+      if (res.regions.length >= 2) {
+        for (var i = 0; i < res.regions.length; i++) {
+          var sub = await WC.extractRegion(bmp, a, res, i, {});
+          outs.push(await cropDeskew(sub));
+        }
+      }
+      return { res: res, outs: outs, ms: ms };
+    }
+
+    test('여러 장 분리: 2×2로 놓인 기운 사진 4장', async function () {
+      var specs = [{ cx: 650, cy: 900, w: 900, h: 1200, a: 3 }, { cx: 1800, cy: 880, w: 800, h: 1100, a: -6 },
+                   { cx: 640, cy: 2550, w: 950, h: 1250, a: -1.5 }, { cx: 1820, cy: 2600, w: 820, h: 1080, a: 8 }];
+      var r = await splitAll(await jpegRoundTrip(multiPage(specs), 0.85));
+      var ok = r.res.regions.length === 4, notes = [];
+      r.outs.forEach(function (o, i) {
+        var e = edgePaperRatio(o.out, 10), sp = specs[i];
+        var good = Math.abs(o.out.width - sp.w) / sp.w < 0.02 && Math.abs(o.out.height - sp.h) / sp.h < 0.02 && e === 0;
+        ok = ok && good;
+        notes.push(o.out.width + '×' + o.out.height + (good ? '' : '✗'));
+      });
+      return { pass: ok, detail: r.res.regions.length + '장 찾음 (' + r.ms.toFixed(0) + 'ms) → ' + notes.join(' · ') + ' (원래 900×1200 · 800×1100 · 950×1250 · 820×1080, 가장자리 흰 틈 0%)',
+        thumbs: r.outs.slice(0, 4).map(function (o) { return thumb(o.out); }) };
+    });
+
+    test('여러 장 분리: 사진 1장 · 문서 · 빈 페이지는 나누지 않음', async function () {
+      var one = multiPage([{ cx: 1240, cy: 1500, w: 1600, h: 2100, a: 2 }]);
+      var doc = canvas(2480, 3508, function (ctx) {
+        ctx.fillStyle = '#222'; ctx.font = '44px sans-serif';
+        for (var i = 0; i < 40; i++) ctx.fillText('여러 장 분리 시험용 문서 줄 ' + i + ' — The quick brown fox', 260, 400 + i * 70);
+      });
+      var blank = canvas(2480, 3508);
+      var r1 = await splitAll(one), r2 = await splitAll(doc), r3 = await splitAll(blank);
+      var n = [r1.res.regions.length, r2.res.regions.length, r3.res.regions.length];
+      return { pass: n[0] <= 1 && n[1] <= 1 && n[2] <= 1, detail: '사진 1장 → ' + n[0] + ' · 문서 → ' + n[1] + ' · 빈 페이지 → ' + n[2] + ' (모두 1 이하면 나누지 않음)' };
+    });
+
     function sameArray(a, b) {
       if (!a || !b || a.length !== b.length) return false;
       for (var i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;

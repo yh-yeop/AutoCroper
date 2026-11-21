@@ -171,3 +171,12 @@ figcaption { margin-top: 4px; font-size: 0.8rem; color: var(--muted); font-varia
 
 .foot { padding-bottom: 24px; font-size: 0.85rem; }
 .foot a { color: var(--muted); }
+
+/* 업데이트 안내 */
+.update-bar {
+  position: sticky; top: 0; z-index: 10; display: flex; align-items: center; justify-content: center; gap: 10px;
+  flex-wrap: wrap; padding: 8px 16px; background: var(--accent); color: var(--accent-text); font-size: 0.9rem;
+}
+.update-bar .primary { background: var(--accent-text); color: var(--accent); }
+.update-bar .icon { border-color: transparent; color: inherit; }
+.foot .link { font-size: inherit; color: var(--muted); text-decoration: underline; }

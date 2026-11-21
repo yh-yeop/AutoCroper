@@ -13,6 +13,11 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
+  <div id="update-bar" class="update-bar" role="status" aria-live="polite" hidden>
+    <span id="update-text"></span>
+    <button type="button" id="update-btn" class="primary small" hidden></button>
+    <button type="button" id="update-close" class="icon small" aria-label="닫기" title="닫기">×</button>
+  </div>
   <header class="top">
     <div class="wrap">
       <h1>흰 여백 자르기</h1>
@@ -120,7 +125,7 @@
   </main>
 
   <footer class="wrap foot">
-    <span id="test-link"><a href="test.html">알고리즘 테스트</a> · </span><a href="https://github.com/yh-yeop/AutoCroper">소스 코드 (MIT)</a>
+    <span id="test-link"><a href="test.html">알고리즘 테스트</a> · </span><a href="https://github.com/yh-yeop/AutoCroper">소스 코드 (MIT)</a><span id="desk-ver" hidden> · <span id="ver-text"></span> · <button type="button" id="check-update-btn" class="link small">업데이트 확인</button></span>
   </footer>
 
   <template id="card-tpl">

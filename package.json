@@ -16,6 +16,9 @@
     "start": "electron .",
     "dist:win": "electron-builder --win nsis --x64"
   },
+  "dependencies": {
+    "electron-updater": "6.8.11"
+  },
   "devDependencies": {
     "electron": "45.4.1",
     "electron-builder": "26.18.0"
@@ -69,6 +72,13 @@
       "artifactName": "AutoCroper-Setup-${version}.exe",
       "deleteAppDataOnUninstall": false,
       "include": "build/installer.nsh"
-    }
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "yh-yeop",
+        "repo": "AutoCroper"
+      }
+    ]
   }
 }

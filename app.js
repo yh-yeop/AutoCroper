@@ -548,11 +548,521 @@
   var DEFAULTS = { threshold: 40, noise: 5, padding: 0, trim: true, deskew: true, split: true, autoSave: false, rotation: 0, format: 'jpeg', quality: 92 };
   var DESKEW_MIN = 0.1; // 이보다 작은 기울기(도)는 보간 손실이 더 커서 그대로 둔다
 
+  /* ───────── 여러 장 분리 (한 번에 여러 사진을 스캔한 파일) ───────── */
+  /* ───────────── 여러 장 사진 나누기 (스캔 한 장에 사진 여러 장) ─────────────
+   * 흰 종이 위에 놓인 사진 2~6장을 각각의 영역으로 나눈다.
+   *  1) 거친 격자(칸 = 최소 틈의 약 1/5, 2px 이상)로 줄이고, 칸 안 픽셀의 절반 이상이
+   *     '종이보다 확실히 진한'(d > tL) 칸을 꽉 찬 칸으로 본다. tL = 종이 밝기(밝은 픽셀의
+   *     중앙값) + 10 이라, 흐린 하늘 · 흰 옷처럼 거의 흰 부분도 사진으로 잡힌다.
+   *  2) 3×3 닫기(팽창→침식)로 사진 속 가는 흰 선을 메운다. 칸이 최소 틈의 1/5 이라
+   *     사진 사이 틈(3~4칸 이상)은 메워지지 않는다.
+   *  3) 4-연결 성분으로 나누고, 한 성분에 완전히 둘러싸인 빈 칸(구멍)은 그 성분에 넣는다.
+   *  4) 흰 띠가 사진 하나를 가로질러 둘로 나눈 경우: 두 조각의 바깥 변 양 끝이 맞고, 마주 보는 변 중
+   *     하나라도 들쭉날쭉하거나(진짜 사진 테두리는 곧다) 틈이 최소 틈의 60% 미만(가는 흰 선)이면 다시 합친다.
+   *  5) 사진 후보 = 닫기 전 꽉 찬 칸 비율 ≥ 0.7 이고 넓이 ≥ 페이지의 1.5%(두께 ≥ 짧은 변의 5%, 채움 ≥ 0.5),
+   *     또는 넓이 0.3% 이상의 반듯한 사각형. 글자 · 선 그림 덩어리(비율 0.55 이하)는 여기서 빠진다.
+   *  6) 후보가 2개 이상이고 후보 밖에 남은 진한 픽셀(d > 임계값)이 전체의 10% 이하일 때만
+   *     나눈다(문서에 사진이 섞인 페이지 등은 나누지 않음). 결과는 읽는 순서로 정렬.
+   * 반환: { regions: [{x0,y0,x1,y1,label,fill}], grid: {cell,gw,gh,labels}, split, reason, stray, lightThreshold }
+   *  regions.length ≥ 2(split=true)일 때만 나누면 된다. 1 = 사진 한 장, 0 = 사진 아님/나누지 않음.
+   * 외부 변수 · 전역 상태를 쓰지 않는다(이 파일의 split* 보조 함수만 쓴다).
+   */
+  function findPhotoRegions(a, threshold, opts) {
+    opts = opts || {};
+    var W = a.w, H = a.h, dm = a.dmap;
+    var T = Math.max(1, Math.min(254, Math.round(threshold == null ? 40 : threshold)));
+    var minGap = Math.max(8, Math.min(W, H) * 0.01);
+    var cell = opts.cell || Math.max(2, Math.round(minGap / 5));
+    var gw = Math.ceil(W / cell), gh = Math.ceil(H / cell), N = gw * gh;
+    var labels = new Int32Array(N);
+    var res = { regions: [], grid: { cell: cell, gw: gw, gh: gh, labels: labels }, split: false, reason: '', stray: 0, lightThreshold: 0 };
+    if (!dm || W < 16 || H < 16) { res.reason = 'too-small'; return res; }
+    var x, y, i, k, gx, gy;
+
+    // 1) 종이 밝기: 듬성듬성 뽑은 밝은 픽셀(d ≤ T)의 중앙값 → tL
+    var hist = new Uint32Array(256), nLight = 0, med = 0;
+    var sy = Math.max(1, Math.floor(H / 400)), sx = Math.max(1, Math.floor(W / 400));
+    for (y = 0; y < H; y += sy) for (k = y * W, x = 0; x < W; x += sx) hist[dm[k + x]]++;
+    for (i = 0; i <= T; i++) nLight += hist[i];
+    for (i = 0, k = 0; i <= T; i++) { k += hist[i]; if (k * 2 >= nLight) { med = i; break; } }
+    var tL = opts.lightThreshold || Math.min(T, Math.max(10, med + 10));
+    res.lightThreshold = tL;
+
+    // 2) 칸별 개수: d > tL(꽉 참 판정), d > T(진한 픽셀). 칸이 4px 이상이면 칸 안에서
+    //    두 줄에 한 줄, 두 칸에 한 칸만 본다(표본 수는 칸마다 세어 둔다).
+    var st = cell >= 4 ? 2 : 1;
+    var cntL = new Int32Array(N), cntT = new Int32Array(N);
+    var colN = new Int32Array(gw), rowN = new Int32Array(gh);
+    for (gx = 0; gx < gw; gx++) colN[gx] = Math.ceil((Math.min(W, gx * cell + cell) - gx * cell) / st);
+    for (gy = 0; gy < gh; gy++) rowN[gy] = Math.ceil((Math.min(H, gy * cell + cell) - gy * cell) / st);
+    for (gy = 0; gy < gh; gy++) {
+      var rb = gy * gw, yEnd = Math.min(H, gy * cell + cell);
+      for (y = gy * cell; y < yEnd; y += st) {
+        var k0 = y * W;
+        for (gx = 0, x = 0; gx < gw; gx++, x += cell) {
+          var ke = k0 + Math.min(W, x + cell), nl = 0, nt = 0, d;
+          for (var kk = k0 + x; kk < ke; kk += st) { d = dm[kk]; nl += d > tL ? 1 : 0; nt += d > T ? 1 : 0; }
+          if (nl) { cntL[rb + gx] += nl; cntT[rb + gx] += nt; }
+        }
+      }
+    }
+    var raw = new Uint8Array(N), inkTotal = 0;
+    for (gy = 0, i = 0; gy < gh; gy++) for (gx = 0; gx < gw; gx++, i++) {
+      if (cntL[i] * 2 >= colN[gx] * rowN[gy]) raw[i] = 1;
+      inkTotal += cntT[i];
+    }
+
+    // 3) 닫기(3×3) → 4-연결 성분 + 구멍 메우기(가로 줄 단위 run 과 union-find 로 한 번에)
+    var mask = splitMorph(splitMorph(raw, gw, gh, 1, true), gw, gh, 1, false);
+    var nLab = splitLabel(mask, gw, gh, labels);
+    if (!nLab) { res.reason = 'blank'; return res; }
+    var L; // 라벨 임시 변수
+
+    // 4) 성분 통계(넓이, 닫기 전 꽉 찬 칸 수, 칸 상자)
+    var area = new Int32Array(nLab + 1), rawN = new Int32Array(nLab + 1);
+    var bx0 = new Int32Array(nLab + 1).fill(gw), by0 = new Int32Array(nLab + 1).fill(gh), bx1 = new Int32Array(nLab + 1).fill(-1), by1 = new Int32Array(nLab + 1).fill(-1);
+    for (gy = 0, i = 0; gy < gh; gy++) for (gx = 0; gx < gw; gx++, i++) {
+      L = labels[i];
+      if (!L) continue;
+      area[L]++; rawN[L] += raw[i];
+      if (gx < bx0[L]) bx0[L] = gx; if (gx > bx1[L]) bx1[L] = gx;
+      if (gy < by0[L]) by0[L] = gy; if (gy > by1[L]) by1[L] = gy;
+    }
+    // 조각(페이지의 0.2% 이상)만 자세히: 행별 좌우 끝, 열별 위아래 끝
+    var pieceOf = new Int32Array(nLab + 1).fill(-1), pieces = [];
+    for (L = 1; L <= nLab; L++) {
+      if (area[L] < 0.002 * N) continue;
+      pieceOf[L] = pieces.length;
+      var pw = bx1[L] - bx0[L] + 1, ph = by1[L] - by0[L] + 1;
+      pieces.push({ label: L, labs: [L], area: area[L], raw: rawN[L], gx0: bx0[L], gy0: by0[L], gx1: bx1[L], gy1: by1[L],
+        rowL: new Int32Array(ph).fill(-1), rowR: new Int32Array(ph).fill(-1), colT: new Int32Array(pw).fill(-1), colB: new Int32Array(pw).fill(-1) });
+    }
+    pieces.forEach(function (P) { splitEnvelope(P, labels, gw); });
+    pieces.forEach(function (c) { c.rect = splitMinRect(splitHullPts(c)); c.fill = c.area / c.rect.area; });
+
+    // 5) 흰 띠로 갈라진 한 장 다시 합치기
+    if (opts.mergeBands !== false && pieces.length > 1) splitMergeBands(pieces, labels, 0.6 * minGap / cell);
+
+    if (opts.debug) res.pieces = pieces.map(function (c) {
+      return { label: c.label, area: c.area / N, raw: c.raw / c.area, fill: c.fill, short: c.rect.short / Math.min(gw, gh), merged: !!c.merged, mergedInto: c.mergedInto || 0 };
+    });
+
+    // 6) 사진 후보
+    //    꽉 찬 칸 비율 ≥ 0.7(글자 덩어리는 0.55 이하), 두께 ≥ 짧은 변의 5%(스캐너 가장자리 띠 제외),
+    //    넓이 ≥ 1.5%, 기운 사각형 채움 ≥ 0.5(ㄱ자 가장자리 띠 등 제외). 0.3~1.5% 라도 반듯한 사각형(채움 ≥ 0.85, 두께 ≥ 3%)이면 작은 사진으로 본다.
+    var minCells = (opts.minArea || 0.015) * N, shortCells = Math.min(gw, gh);
+    var cands = pieces.filter(function (c) {
+      if (c.mergedInto || c.raw < 0.7 * c.area) return false;
+      if (c.area >= minCells && c.rect.short >= 0.05 * shortCells && (c.merged || c.fill >= 0.5)) return true;
+      return c.area >= 0.003 * N && c.fill >= 0.85 && c.rect.short >= 0.03 * shortCells;
+    });
+    if (!cands.length) { res.reason = 'no-photo'; return res; }
+
+    // 후보 밖에 남은 진한 픽셀 비율(후보 성분을 1칸 넓혀서 잰다)
+    var candLab = new Uint8Array(nLab + 1), inkOut = 0;
+    cands.forEach(function (c) { candLab[c.label] = 1; });
+    for (gy = 0, i = 0; gy < gh; gy++) for (gx = 0; gx < gw; gx++, i++) {
+      if (!cntT[i] || candLab[labels[i]]) continue;
+      var nearC = false;
+      for (var dy = -1; dy <= 1 && !nearC; dy++) {
+        var yy = gy + dy; if (yy < 0 || yy >= gh) continue;
+        for (var dx = -1; dx <= 1; dx++) { var xx = gx + dx; if (xx >= 0 && xx < gw && candLab[labels[yy * gw + xx]]) { nearC = true; break; } }
+      }
+      if (!nearC) inkOut += cntT[i];
+    }
+    res.stray = inkTotal ? inkOut / inkTotal : 0;
+
+    // 7) 픽셀 단위 상자 → 읽는 순서
+    var regs = cands.map(function (c) { return splitPixelBox(a, labels, gw, gh, cell, c, tL); });
+    regs = orderRegions(regs);
+    if (regs.length >= 2 && res.stray > (opts.maxStray == null ? 0.1 : opts.maxStray)) {
+      res.reason = 'stray-content'; res.candidates = regs;
+      return res;
+    }
+    res.regions = regs; res.split = regs.length >= 2;
+    res.reason = res.split ? 'split' : 'single';
+    return res;
+  }
+
+  // 이진 격자 팽창(dilate=true, 격자 밖=0) / 침식(false, 격자 밖=1). 반지름 r 정사각형 = 3×3 을 r번.
+  function splitMorph(src, gw, gh, r, dilate) {
+    var cur = src, x, y, b, n = gw * gh;
+    for (var it = 0; it < r; it++) {
+      var tmp = new Uint8Array(n), out = new Uint8Array(n);
+      if (dilate) {
+        for (y = 0; y < gh; y++) {
+          b = y * gw; tmp[b] = cur[b] | (gw > 1 ? cur[b + 1] : 0);
+          for (x = 1; x < gw - 1; x++) tmp[b + x] = cur[b + x - 1] | cur[b + x] | cur[b + x + 1];
+          if (gw > 1) tmp[b + gw - 1] = cur[b + gw - 2] | cur[b + gw - 1];
+        }
+        for (x = 0; x < gw; x++) out[x] = tmp[x] | (gh > 1 ? tmp[x + gw] : 0);
+        for (b = gw; b < n - gw; b++) out[b] = tmp[b - gw] | tmp[b] | tmp[b + gw];
+        if (gh > 1) for (b = n - gw; b < n; b++) out[b] = tmp[b - gw] | tmp[b];
+      } else {
+        for (y = 0; y < gh; y++) {
+          b = y * gw; tmp[b] = cur[b] & (gw > 1 ? cur[b + 1] : 1);
+          for (x = 1; x < gw - 1; x++) tmp[b + x] = cur[b + x - 1] & cur[b + x] & cur[b + x + 1];
+          if (gw > 1) tmp[b + gw - 1] = cur[b + gw - 2] & cur[b + gw - 1];
+        }
+        for (x = 0; x < gw; x++) out[x] = tmp[x] & (gh > 1 ? tmp[x + gw] : 1);
+        for (b = gw; b < n - gw; b++) out[b] = tmp[b - gw] & tmp[b] & tmp[b + gw];
+        if (gh > 1) for (b = n - gw; b < n; b++) out[b] = tmp[b - gw] & tmp[b];
+      }
+      cur = out;
+    }
+    return cur;
+  }
+
+  /* 4-연결 성분 라벨링 + 구멍 메우기. 각 행을 같은 값의 구간(run)으로 나누고, 위아래로 겹치는
+   * 같은 종류 구간을 union-find 로 잇는다. 가장자리에 닿지 않는 빈 덩어리가 내용 성분 하나에만
+   * 닿아 있으면 그 성분의 구멍으로 보고 같은 라벨을 준다. 반환값 = 성분 수(라벨 1..n). */
+  function splitLabel(mask, gw, gh, labels) {
+    var x, y, b, i, j, n = 0;
+    for (y = 0; y < gh; y++) { b = y * gw; n++; for (x = 1; x < gw; x++) if (mask[b + x] !== mask[b + x - 1]) n++; }
+    var rs = new Int32Array(n), re = new Int32Array(n), rowStart = new Int32Array(gh + 1), par = new Int32Array(n);
+    for (y = 0, j = 0; y < gh; y++) {
+      b = y * gw; rowStart[y] = j; rs[j] = 0;
+      for (x = 1; x < gw; x++) if (mask[b + x] !== mask[b + x - 1]) { re[j] = x - 1; j++; rs[j] = x; }
+      re[j] = gw - 1; j++;
+    }
+    rowStart[gh] = n;
+    for (i = 0; i < n; i++) par[i] = i;
+    function find(a) { while (par[a] !== a) { par[a] = par[par[a]]; a = par[a]; } return a; }
+    function fg(r, yy) { return mask[yy * gw + rs[r]]; }
+    // 위 행과 겹치는 구간 쌍마다 visit(위, 아래) 호출
+    function overlaps(visit) {
+      for (var yy = 1; yy < gh; yy++) {
+        var p = rowStart[yy - 1], pe = rowStart[yy], q = rowStart[yy], qe = rowStart[yy + 1];
+        while (p < pe && q < qe) {
+          visit(p, q, yy);
+          if (re[p] < re[q]) p++; else if (re[q] < re[p]) q++; else { p++; q++; }
+        }
+      }
+    }
+    overlaps(function (p, q, yy) {
+      if (fg(p, yy - 1) === fg(q, yy)) { var a = find(p), c = find(q); if (a !== c) par[a < c ? c : a] = a < c ? a : c; }
+    });
+    // 가장자리 빈 덩어리 표시, 빈 덩어리별 주인(닿는 내용 성분: 0=없음, -1=여럿)
+    var border = new Uint8Array(n), owner = new Int32Array(n);
+    for (y = 0; y < gh; y++) for (i = rowStart[y]; i < rowStart[y + 1]; i++) {
+      if (fg(i, y)) continue;
+      if (y === 0 || y === gh - 1 || rs[i] === 0 || re[i] === gw - 1) border[find(i)] = 1;
+    }
+    function own(bgRun, fgRun) {
+      var r = find(bgRun), f = find(fgRun) + 1;
+      if (border[r]) return;
+      owner[r] = owner[r] === 0 || owner[r] === f ? f : -1;
+    }
+    for (y = 0; y < gh; y++) for (i = rowStart[y]; i + 1 < rowStart[y + 1]; i++) {
+      if (fg(i, y)) own(i + 1, i); else own(i, i + 1);
+    }
+    overlaps(function (p, q, yy) {
+      var a = fg(p, yy - 1), c = fg(q, yy);
+      if (a !== c) { if (a) own(q, p); else own(p, q); }
+    });
+    // 라벨 매기기(래스터 순서) 후 기록
+    var lab = new Int32Array(n), nLab = 0;
+    for (y = 0; y < gh; y++) for (i = rowStart[y]; i < rowStart[y + 1]; i++) {
+      var r = find(i), L = 0;
+      if (fg(i, y)) { if (!lab[r]) lab[r] = ++nLab; L = lab[r]; }
+      else if (!border[r] && owner[r] > 0) {
+        var o = find(owner[r] - 1);
+        if (!lab[o]) lab[o] = ++nLab;
+        L = lab[o];
+      }
+      if (L) labels.fill(L, y * gw + rs[i], y * gw + re[i] + 1);
+    }
+    return nLab;
+  }
+
+  // 조각의 볼록 껍질 꼭짓점을 모두 포함하는 점들: 각 행 양 끝 칸의 모서리
+  function splitHullPts(c) {
+    var pts = [];
+    for (var r = 0; r < c.rowL.length; r++) {
+      if (c.rowL[r] < 0) continue;
+      var y = c.gy0 + r, l = c.rowL[r], rr = c.rowR[r] + 1;
+      pts.push(l, y, l, y + 1, rr, y, rr, y + 1);
+    }
+    return pts;
+  }
+
+  // 최소 넓이 기운 사각형(±15°): 1° 간격으로 찾은 뒤 ±0.5° 를 더 본다
+  function splitMinRect(pts) {
+    function at(deg) {
+      var r = deg * Math.PI / 180, cs = Math.cos(r), sn = Math.sin(r);
+      var u0 = Infinity, u1 = -Infinity, v0 = Infinity, v1 = -Infinity;
+      for (var i = 0; i < pts.length; i += 2) {
+        var u = pts[i] * cs + pts[i + 1] * sn, v = pts[i + 1] * cs - pts[i] * sn;
+        if (u < u0) u0 = u; if (u > u1) u1 = u; if (v < v0) v0 = v; if (v > v1) v1 = v;
+      }
+      return { area: (u1 - u0) * (v1 - v0), deg: deg, short: Math.min(u1 - u0, v1 - v0) };
+    }
+    var best = at(0), deg, c;
+    for (deg = -15; deg <= 15; deg++) if (deg && (c = at(deg)).area < best.area) best = c;
+    var d0 = best.deg;
+    if ((c = at(d0 - 0.5)).area < best.area) best = c;
+    if ((c = at(d0 + 0.5)).area < best.area) best = c;
+    return best;
+  }
+
+  // 조각의 행별 좌우 끝 · 열별 위아래 끝(상자 끝에서 안쪽으로 찾는다)
+  function splitEnvelope(P, labels, gw) {
+    var L = P.label, gx, gy, b;
+    for (gy = P.gy0; gy <= P.gy1; gy++) {
+      b = gy * gw;
+      for (gx = P.gx0; gx <= P.gx1 && labels[b + gx] !== L; gx++);
+      if (gx > P.gx1) continue;
+      P.rowL[gy - P.gy0] = gx;
+      for (gx = P.gx1; labels[b + gx] !== L; gx--);
+      P.rowR[gy - P.gy0] = gx;
+    }
+    for (gx = P.gx0; gx <= P.gx1; gx++) {
+      for (gy = P.gy0; gy <= P.gy1 && labels[gy * gw + gx] !== L; gy++);
+      if (gy > P.gy1) continue;
+      P.colT[gx - P.gx0] = gy;
+      for (gy = P.gy1; labels[gy * gw + gx] !== L; gy--);
+      P.colB[gx - P.gx0] = gy;
+    }
+  }
+
+  /* 흰 띠 합치기. 두 조각을 합친 기운 사각형의 축(u: 띠 방향, v: 띠를 가로지르는 방향)에서
+   *  - 두 조각의 u 범위 양 끝이 맞고(둘 다 사진 폭 전체에 걸침),
+   *  - v 방향으로 떨어져 있고 그 틈이 두 조각 중 얇은 쪽 두께 이하이며,
+   *  - 마주 보는 변 중 하나라도 들쭉날쭉하거나(직선에서 평균 1.5칸 넘게 벗어남),
+   *    틈(중앙값)이 thinGap 칸 이하(최소 틈의 60%, 가는 흰 선)이면 합친다.
+   * 따로 놓인 진짜 사진 두 장은 마주 보는 변이 둘 다 곧고 틈이 넓어 합쳐지지 않는다. */
+  function splitMergeBands(pieces, labels, thinGap) {
+    for (var guard = 0; guard < 20; guard++) {
+      var live = pieces.filter(function (c) { return !c.mergedInto; }), hit = null;
+      for (var i = 0; i < live.length && !hit; i++) {
+        for (var j = i + 1; j < live.length && !hit; j++) {
+          var A = live[i], B = live[j];
+          var ox = Math.min(A.gx1, B.gx1) - Math.max(A.gx0, B.gx0), oy = Math.min(A.gy1, B.gy1) - Math.max(A.gy0, B.gy0);
+          var minW = Math.min(A.gx1 - A.gx0, B.gx1 - B.gx0), minH = Math.min(A.gy1 - A.gy0, B.gy1 - B.gy0);
+          // 위아래로 놓였고 가로 범위가 거의 같거나, 좌우로 놓였고 세로 범위가 거의 같을 때만
+          var vert = ox >= 0.8 * minW && -oy <= minH, horiz = oy >= 0.8 * minH && -ox <= minW;
+          if ((vert || horiz) && splitBandPair(A, B, vert, horiz, thinGap)) hit = [A, B];
+        }
+      }
+      if (!hit) break;
+      splitJoin(hit[0], hit[1]);
+    }
+    var remap = null;
+    pieces.forEach(function (c) {
+      if (c.mergedInto || c.labs.length < 2) return;
+      remap = remap || {};
+      c.labs.forEach(function (L) { if (L !== c.label) remap[L] = c.label; });
+    });
+    if (remap) for (var k = 0; k < labels.length; k++) { var r = labels[k] && remap[labels[k]]; if (r) labels[k] = r; }
+  }
+
+  function splitBandPair(A, B, vert, horiz, thinGap) {
+    var rect = splitMinRect(splitHullPts(A).concat(splitHullPts(B)));
+    var r = rect.deg * Math.PI / 180, cs = Math.cos(r), sn = Math.sin(r);
+    for (var dir = 0; dir < 2; dir++) {
+      if (dir === 0 && !vert) continue;
+      if (dir === 1 && !horiz) continue;
+      // dir 0: 가로 띠 → 마주 보는 변은 열별 위/아래 끝. dir 1: 세로 띠 → 행별 왼/오른 끝.
+      var ea = splitEdges(A, cs, sn, dir), eb = splitEdges(B, cs, sn, dir);
+      var ext = Math.max(ea.u1, eb.u1) - Math.min(ea.u0, eb.u0), tol = Math.max(3, ext * 0.03);
+      if (Math.abs(ea.u0 - eb.u0) > tol || Math.abs(ea.u1 - eb.u1) > tol) continue;
+      var f = ea.vmid < eb.vmid ? ea : eb, s = f === ea ? eb : ea;
+      var lo = Math.ceil(Math.max(ea.u0, eb.u0) + ext * 0.1), hi = Math.floor(Math.min(ea.u1, eb.u1) - ext * 0.1);
+      if (hi - lo < 10) continue;
+      var p1 = [], p2 = [], gaps = [];
+      for (var u = lo; u <= hi; u++) {
+        var a1 = f.hiV[u - f.base], b1 = s.loV[u - s.base];
+        if (a1 === undefined || b1 === undefined) continue;
+        p1.push(u, a1); p2.push(u, b1); gaps.push(b1 - a1);
+      }
+      if (gaps.length < 10) continue;
+      gaps.sort(function (x, y) { return x - y; });
+      var g = gaps[gaps.length >> 1];
+      if (g <= 0 || g > Math.min(f.v1 - f.v0, s.v1 - s.v0)) continue;
+      // 들쭉날쭉한 변(날아간 흰 하늘 등)으로 합치는 건 틈이 좁을 때만: 크기가 같은 사진 두 장이
+      // 나란히 놓였는데 한쪽 가장자리가 밝아 들쭉날쭉해 보이는 흔한 경우를 잘못 합치지 않도록.
+      if (g <= thinGap || (g <= thinGap * 3 && Math.max(splitResidual(p1), splitResidual(p2)) > 1.5)) return true;
+    }
+    return false;
+  }
+
+  // 기운 좌표(u,v)에서 조각의 위쪽(작은 v)/아래쪽(큰 v) 끝 윤곽을 u 1칸 단위로
+  function splitEdges(c, cs, sn, dir) {
+    var loV = [], hiV = [], u0 = Infinity, u1 = -Infinity, v0 = Infinity, v1 = -Infinity, pts = [], n, t;
+    if (dir === 0) {
+      for (t = 0; t < c.colT.length; t++) if (c.colT[t] >= 0) pts.push(c.gx0 + t + 0.5, c.colT[t], c.gx0 + t + 0.5, c.colB[t] + 1);
+    } else {
+      for (t = 0; t < c.rowL.length; t++) if (c.rowL[t] >= 0) pts.push(c.rowL[t], c.gy0 + t + 0.5, c.rowR[t] + 1, c.gy0 + t + 0.5);
+    }
+    n = pts.length;
+    var U = new Float64Array(n / 2), V = new Float64Array(n / 2);
+    for (t = 0; t < n; t += 2) {
+      var X = pts[t], Y = pts[t + 1], uu = X * cs + Y * sn, vv = -X * sn + Y * cs;
+      if (dir) { var sw = uu; uu = vv; vv = sw; }
+      U[t >> 1] = uu; V[t >> 1] = vv;
+      if (uu < u0) u0 = uu; if (uu > u1) u1 = uu; if (vv < v0) v0 = vv; if (vv > v1) v1 = vv;
+    }
+    var base = Math.floor(u0);
+    for (t = 0; t < U.length; t++) {
+      var s = Math.floor(U[t]) - base, v = V[t];
+      if (loV[s] === undefined || v < loV[s]) loV[s] = v;
+      if (hiV[s] === undefined || v > hiV[s]) hiV[s] = v;
+    }
+    return { loV: loV, hiV: hiV, base: base, u0: u0, u1: u1, v0: v0, v1: v1, vmid: (v0 + v1) / 2 };
+  }
+
+  // 최소제곱 직선에서의 평균 절대 잔차
+  function splitResidual(pts) {
+    var n = pts.length / 2, su = 0, sv = 0, suu = 0, suv = 0, i;
+    for (i = 0; i < pts.length; i += 2) { su += pts[i]; sv += pts[i + 1]; suu += pts[i] * pts[i]; suv += pts[i] * pts[i + 1]; }
+    var den = n * suu - su * su, m = den ? (n * suv - su * sv) / den : 0, c = (sv - m * su) / n, e = 0;
+    for (i = 0; i < pts.length; i += 2) e += Math.abs(pts[i + 1] - (m * pts[i] + c));
+    return e / n;
+  }
+
+  // B를 A에 합친다(윤곽 배열은 합친 상자 크기로 다시 만든다)
+  function splitJoin(A, B) {
+    var gx0 = Math.min(A.gx0, B.gx0), gy0 = Math.min(A.gy0, B.gy0), gx1 = Math.max(A.gx1, B.gx1), gy1 = Math.max(A.gy1, B.gy1);
+    var rowL = new Int32Array(gy1 - gy0 + 1).fill(-1), rowR = new Int32Array(gy1 - gy0 + 1).fill(-1);
+    var colT = new Int32Array(gx1 - gx0 + 1).fill(-1), colB = new Int32Array(gx1 - gx0 + 1).fill(-1);
+    [A, B].forEach(function (c) {
+      var t, j;
+      for (t = 0; t < c.rowL.length; t++) {
+        if (c.rowL[t] < 0) continue;
+        j = c.gy0 + t - gy0;
+        rowL[j] = rowL[j] < 0 ? c.rowL[t] : Math.min(rowL[j], c.rowL[t]);
+        rowR[j] = Math.max(rowR[j], c.rowR[t]);
+      }
+      for (t = 0; t < c.colT.length; t++) {
+        if (c.colT[t] < 0) continue;
+        j = c.gx0 + t - gx0;
+        colT[j] = colT[j] < 0 ? c.colT[t] : Math.min(colT[j], c.colT[t]);
+        colB[j] = Math.max(colB[j], c.colB[t]);
+      }
+    });
+    A.gx0 = gx0; A.gy0 = gy0; A.gx1 = gx1; A.gy1 = gy1;
+    A.rowL = rowL; A.rowR = rowR; A.colT = colT; A.colB = colB;
+    A.area += B.area; A.raw += B.raw; A.labs = A.labs.concat(B.labs);
+    A.rect = splitMinRect(splitHullPts(A)); A.fill = A.area / A.rect.area;
+    A.merged = true; B.mergedInto = A.label;
+  }
+
+  // 성분의 픽셀 단위 상자. 바깥 끝은 칸 상자의 가장 바깥 칸과 그 바로 바깥 칸에만 있으므로
+  // 그 띠에서 (자기 성분이거나 자기 성분에 붙은) 칸의 d > tL 픽셀만 본다.
+  function splitPixelBox(a, labels, gw, gh, cell, c, tL) {
+    var W = a.w, H = a.h, dm = a.dmap, own = c.label;
+    var x0 = c.gx0 * cell, y0 = c.gy0 * cell, x1 = Math.min(W, (c.gx1 + 1) * cell) - 1, y1 = Math.min(H, (c.gy1 + 1) * cell) - 1;
+    var X0 = W, Y0 = H, X1 = -1, Y1 = -1;
+    function mineOrNear(gx, gy) {
+      for (var dy = -1; dy <= 1; dy++) {
+        var yy = gy + dy; if (yy < 0 || yy >= gh) continue;
+        for (var dx = -1; dx <= 1; dx++) {
+          var xx = gx + dx; if (xx >= 0 && xx < gw && labels[yy * gw + xx] === own) return true;
+        }
+      }
+      return false;
+    }
+    function scan(gx, gy) {
+      if (gx < 0 || gy < 0 || gx >= gw || gy >= gh || !mineOrNear(gx, gy)) return;
+      var px0 = gx * cell, py0 = gy * cell, px1 = Math.min(W, px0 + cell) - 1, py1 = Math.min(H, py0 + cell) - 1;
+      for (var y = py0; y <= py1; y++) for (var x = px0, k = y * W + px0; x <= px1; x++, k++) {
+        if (dm[k] > tL) { if (x < X0) X0 = x; if (x > X1) X1 = x; if (y < Y0) Y0 = y; if (y > Y1) Y1 = y; }
+      }
+    }
+    var gx, gy;
+    for (gy = c.gy0 - 1; gy <= c.gy1 + 1; gy++) { scan(c.gx0 - 1, gy); scan(c.gx0, gy); scan(c.gx1, gy); scan(c.gx1 + 1, gy); }
+    for (gx = c.gx0 + 1; gx < c.gx1; gx++) { scan(gx, c.gy0 - 1); scan(gx, c.gy0); scan(gx, c.gy1); scan(gx, c.gy1 + 1); }
+    // 띠에서 픽셀을 못 찾은 변은 칸 상자 경계를 쓴다
+    return { x0: X1 >= 0 ? Math.min(X0, x0 + cell) : x0, y0: Y1 >= 0 ? Math.min(Y0, y0 + cell) : y0,
+      x1: X1 >= 0 ? Math.max(X1, x1 - cell) : x1, y1: Y1 >= 0 ? Math.max(Y1, y1 - cell) : y1,
+      label: own, fill: Math.round(c.fill * 1000) / 1000 };
+  }
+
+  /* 읽는 순서: 세로 범위가 (작은 쪽 높이의) 절반 넘게 겹치면 같은 줄.
+   * 줄은 위→아래, 줄 안에서는 왼쪽→오른쪽. */
+  function orderRegions(regions) {
+    var s = regions.slice().sort(function (p, q) { return (p.y0 + p.y1) - (q.y0 + q.y1) || p.x0 - q.x0; });
+    var rows = [];
+    s.forEach(function (r) {
+      var h = r.y1 - r.y0 + 1, best = null, bestOv = 0;
+      rows.forEach(function (row) {
+        var ov = 0;
+        row.items.forEach(function (o) {
+          var v = Math.min(o.y1, r.y1) - Math.max(o.y0, r.y0) + 1;
+          ov = Math.max(ov, v / Math.min(h, o.y1 - o.y0 + 1));
+        });
+        if (ov > 0.5 && ov > bestOv) { bestOv = ov; best = row; }
+      });
+      if (best) { best.items.push(r); best.top = Math.min(best.top, r.y0); }
+      else rows.push({ items: [r], top: r.y0 });
+    });
+    rows.sort(function (p, q) { return p.top - q.top; });
+    var out = [];
+    rows.forEach(function (row) {
+      row.items.sort(function (p, q) { return p.x0 - q.x0; });
+      out.push.apply(out, row.items);
+    });
+    return out;
+  }
+
+  /* 영역 i의 이미지(Promise<ImageBitmap>): 상자 + 흰 여백(짧은 변의 2%, 8px 이상)을 잘라 그린 뒤,
+   * 다른 사진 성분(2칸 넓힌 것)에 걸리는 칸을 흰색으로 칠한다. 자기 성분(1칸 넓힌 것)은 칠하지 않으므로
+   * 기운 이웃과 상자가 겹쳐도 자기 사진은 지워지지 않는다.
+   * opts: { margin(px), dilate(칸, 기본 2) } */
+  function extractRegion(bitmap, a, result, i, opts) {
+    opts = opts || {};
+    var r = result.regions[i];
+    if (!r) return Promise.reject(new Error('no-region'));
+    var g = result.grid, cell = g.cell, gw = g.gw, gh = g.gh, labels = g.labels;
+    var W = a.w, H = a.h;
+    var m = opts.margin != null ? opts.margin : Math.max(8, Math.round(0.02 * Math.min(r.x1 - r.x0 + 1, r.y1 - r.y0 + 1)));
+    var X0 = Math.max(0, r.x0 - m), Y0 = Math.max(0, r.y0 - m);
+    var X1 = Math.min(W - 1, r.x1 + m), Y1 = Math.min(H - 1, r.y1 + m);
+    var cw = X1 - X0 + 1, ch = Y1 - Y0 + 1;
+    var canvas;
+    if (typeof OffscreenCanvas !== 'undefined') canvas = new OffscreenCanvas(cw, ch);
+    else { canvas = document.createElement('canvas'); canvas.width = cw; canvas.height = ch; }
+    var ctx = canvas.getContext('2d');
+    if (!ctx) return Promise.reject(new Error('canvas-too-large'));
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, cw, ch);
+    ctx.drawImage(bitmap, X0, Y0, cw, ch, 0, 0, cw, ch);
+
+    var own = r.label, D = opts.dilate || 2, others = {};
+    result.regions.forEach(function (o) { if (o.label !== own) others[o.label] = 1; });
+    // 칸 창: 잘라 낸 사각형에 걸치는 칸 + 넓힐 거리
+    var gx0 = Math.floor(X0 / cell), gy0 = Math.floor(Y0 / cell), gx1 = Math.floor(X1 / cell), gy1 = Math.floor(Y1 / cell);
+    var ex0 = Math.max(0, gx0 - D), ey0 = Math.max(0, gy0 - D), ex1 = Math.min(gw - 1, gx1 + D), ey1 = Math.min(gh - 1, gy1 + D);
+    var ww = ex1 - ex0 + 1, hh = ey1 - ey0 + 1;
+    var oth = new Uint8Array(ww * hh), mine = new Uint8Array(ww * hh), any = false, x, y;
+    for (y = 0; y < hh; y++) for (x = 0; x < ww; x++) {
+      var L = labels[(ey0 + y) * gw + ex0 + x];
+      if (L === own) mine[y * ww + x] = 1;
+      else if (L && others[L]) { oth[y * ww + x] = 1; any = true; }
+    }
+    if (any) {
+      var othD = splitMorph(oth, ww, hh, D, true), mineD = splitMorph(mine, ww, hh, 1, true);
+      for (y = gy0; y <= gy1; y++) {
+        var run = -1;
+        for (x = gx0; x <= gx1 + 1; x++) {
+          var j = (y - ey0) * ww + (x - ex0);
+          var paint = x <= gx1 && othD[j] && !mineD[j];
+          if (paint && run < 0) run = x;
+          if (!paint && run >= 0) { ctx.fillRect(run * cell - X0, y * cell - Y0, (x - run) * cell, cell); run = -1; }
+        }
+      }
+    }
+    return createImageBitmap(canvas);
+  }
+
   window.WhiteCrop = {
     DEFAULTS: DEFAULTS,
     analyzeBitmap: analyzeBitmap,
     computeContentBox: computeContentBox,
     refineBox: refineBox,
+    findPhotoRegions: findPhotoRegions,
+    extractRegion: extractRegion,
+    orderRegions: orderRegions,
     estimateSkew: estimateSkew,
     deskewBitmap: deskewBitmap,
     deskewSize: deskewSize,
@@ -1471,10 +1981,56 @@
     el.exeLink.hidden = true; // 이미 설치형 웹앱으로 실행 중
   }
 
-  // 오프라인 캐시(서비스 워커). 데스크톱 앱 · file:// 등에선 건너뛴다.
+  /* 업데이트 안내 띠 */
+  var upd = { bar: $('#update-bar'), text: $('#update-text'), btn: $('#update-btn'), close: $('#update-close'), action: null };
+  function showUpdate(text, btnLabel, action) {
+    upd.text.textContent = text;
+    upd.btn.hidden = !btnLabel;
+    upd.btn.textContent = btnLabel || '';
+    upd.action = action || null;
+    upd.bar.hidden = false;
+  }
+  upd.btn.addEventListener('click', function () { if (upd.action) upd.action(); });
+  upd.close.addEventListener('click', function () { upd.bar.hidden = true; });
+
+  // 데스크톱 앱: GitHub Releases에서 새 버전을 확인 · 내려받고, 준비되면 다시 시작해 설치
+  if (native) {
+    var dv = $('#desk-ver');
+    if (dv) { dv.hidden = false; $('#ver-text').textContent = 'v' + (native.version || ''); }
+    var manualCheck = false;
+    if (typeof native.onUpdate === 'function') {
+      native.onUpdate(function (st) {
+        if (!st) return;
+        if (st.state === 'downloading') showUpdate('새 버전' + (st.version ? ' v' + st.version : '') + ' 받는 중… ' + (st.percent != null ? Math.round(st.percent) + '%' : ''));
+        else if (st.state === 'available') showUpdate('새 버전' + (st.version ? ' v' + st.version : '') + '을 받는 중입니다…');
+        else if (st.state === 'downloaded') showUpdate('새 버전' + (st.version ? ' v' + st.version : '') + '이 준비됐습니다. 지금 다시 시작하거나, 앱을 닫으면 다음에 설치됩니다.', '다시 시작해 업데이트', function () { native.installUpdate(); });
+        else if (st.state === 'none' && manualCheck) { setStatus('최신 버전입니다 (v' + (native.version || '') + ').'); manualCheck = false; }
+        else if (st.state === 'error' && manualCheck) { setStatus('업데이트를 확인하지 못했습니다. 인터넷 연결을 확인해 주세요.'); manualCheck = false; }
+      });
+    }
+    var cub = $('#check-update-btn');
+    if (cub) cub.addEventListener('click', function () {
+      if (typeof native.checkForUpdates !== 'function') return;
+      manualCheck = true;
+      setStatus('업데이트 확인 중…');
+      native.checkForUpdates();
+    });
+  }
+
+  // 웹 · 설치형 웹앱: 오프라인 캐시(서비스 워커) + 새 버전 감지
   if (!native && 'serviceWorker' in navigator && window.isSecureContext) {
+    var hadController = !!navigator.serviceWorker.controller, reloading = false;
+    navigator.serviceWorker.addEventListener('controllerchange', function () {
+      if (!hadController || reloading) { hadController = true; return; } // 첫 설치는 안내하지 않음
+      if (!items.length) { reloading = true; location.reload(); return; } // 작업 중인 게 없으면 바로 새 버전으로
+      showUpdate('새 버전이 나왔습니다. 작업을 마친 뒤 새로 고치면 적용됩니다.', '지금 새로 고침', function () { reloading = true; location.reload(); });
+    });
     window.addEventListener('load', function () {
-      navigator.serviceWorker.register('sw.js').catch(function () { /* 무시 */ });
+      navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(function (reg) {
+        var check = function () { reg.update().catch(function () {}); };
+        setInterval(check, 60 * 60 * 1000); // 1시간마다
+        document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'visible') check(); });
+      }).catch(function () { /* 무시 */ });
     });
   }
 

@@ -8,6 +8,7 @@ const { app, BrowserWindow, Menu, dialog, ipcMain, nativeTheme, protocol, sessio
 const fs = require('fs');
 const fsp = fs.promises;
 const path = require('path');
+const { createUpdater } = require('./updater');
 
 const SCHEME = 'app';
 const HOST = 'autocroper';
@@ -69,6 +70,10 @@ function main() {
   let rendererReady = false;     // 지금 로드된 페이지가 onOpenFiles 를 구독했는지
   const approvedFolders = new Set(); // saveFile 이 쓸 수 있는 폴더 (사용자가 고른 것만)
   let lastFolder = null;          // 마지막으로 확인한 저장 폴더 (will-download 용)
+  // 자동 업데이트: 상태를 렌더러로 보낸다 (패키징된 앱에서만 실제로 확인)
+  const updater = createUpdater({
+    send: (status) => { if (win && !win.isDestroyed()) win.webContents.send('autocroper:update', status); }
+  });
 
   /* ── 설정 (userData/settings.json) ──────────────────────── */
   const settingsPath = () => path.join(app.getPath('userData'), 'settings.json');
@@ -311,6 +316,39 @@ function main() {
       rendererReady = true;
       return pendingFiles.splice(0, pendingFiles.length);
     });
+
+    ipcMain.handle('autocroper:update-status', (event) => (fromMainWindow(event) ? updater.status() : null));
+
+    ipcMain.handle('autocroper:update-check', async (event) => {
+      if (!fromMainWindow(event)) return;
+      await updater.check();
+    });
+
+    ipcMain.handle('autocroper:update-install', (event) => {
+      if (!fromMainWindow(event)) return;
+      updater.install();
+    });
+  }
+
+  // 도움말 → 업데이트 확인: 사용자가 직접 누른 것이므로 결과를 대화 상자로 알린다.
+  async function checkUpdatesFromMenu() {
+    const st = await updater.checkAndWait();
+    if (!win || win.isDestroyed()) return;
+    const box = (type, message, detail) => dialog.showMessageBox(win, { type, title: '업데이트 확인', buttons: ['확인'], message, detail });
+    if (st.state === 'downloaded') {
+      const r = await dialog.showMessageBox(win, {
+        type: 'info', title: '업데이트 확인', buttons: ['지금 다시 시작', '나중에'], defaultId: 0, cancelId: 1,
+        message: '새 버전 ' + (st.version || '') + '을(를) 받아 두었습니다.',
+        detail: '다시 시작하면 설치됩니다. 나중에를 고르면 앱을 끌 때 설치됩니다.'
+      });
+      if (r.response === 0) updater.install();
+    } else if (st.state === 'available' || st.state === 'downloading') {
+      box('info', '새 버전 ' + (st.version || '') + '을(를) 내려받고 있습니다.', '다 받으면 앱을 끌 때 자동으로 설치됩니다.');
+    } else if (st.state === 'error') {
+      box('warning', '업데이트를 확인하지 못했습니다.', st.message || '');
+    } else {
+      box('info', '최신 버전입니다.', 'AutoCroper ' + app.getVersion() + (st.message ? '\n' + st.message : ''));
+    }
   }
 
   /* ── 메뉴 (Alt 키로 표시) ─────────────────────────────── */
@@ -337,6 +375,8 @@ function main() {
       {
         label: '도움말(&H)',
         submenu: [
+          { label: '업데이트 확인', click: () => { checkUpdatesFromMenu().catch(() => {}); } },
+          { type: 'separator' },
           { label: '소스 코드 (GitHub)', click: () => shell.openExternal(REPO_URL) },
           {
             label: 'AutoCroper 정보',
@@ -387,7 +427,7 @@ function main() {
       }
     });
 
-    win.once('ready-to-show', () => win.show());
+    win.once('ready-to-show', () => { win.show(); updater.start(); });
     win.on('page-title-updated', (e) => e.preventDefault()); // 창 제목은 항상 AutoCroper
     win.on('closed', () => { win = null; rendererReady = false; });
 
