@@ -404,20 +404,70 @@
     }
     var DEG = 180 / Math.PI, good = [];
     var fl = fit(L), fr = fit(R), ft = fit(Tp), fb = fit(B);
+    var big = function () { return estimateSkewHull(a, box, T); }; // 15°보다 크게 기운 사진
     // 세로 변: x = m·y + c → 시계 방향 θ이면 m = −tanθ / 가로 변: y = m·x + c → m = tanθ
     if (fl && fl.frac >= 0.8) good.push({ a: -Math.atan(fl.m) * DEG, f: fl.frac });
     if (fr && fr.frac >= 0.8) good.push({ a: -Math.atan(fr.m) * DEG, f: fr.frac });
     if (ft && ft.frac >= 0.8) good.push({ a: Math.atan(ft.m) * DEG, f: ft.frac });
     if (fb && fb.frac >= 0.8) good.push({ a: Math.atan(fb.m) * DEG, f: fb.frac });
-    if (!good.length) return none;
+    if (!good.length) return big();
     var mid = median(good.map(function (g) { return g.a; }));
     var agree = good.filter(function (g) { return Math.abs(g.a - mid) <= 0.3; });
-    if (agree.length < 2 && !(agree.length === 1 && agree[0].f >= 0.9 && good.length === 1)) return none;
+    if (agree.length < 2 && !(agree.length === 1 && agree[0].f >= 0.9 && good.length === 1)) return big();
     var sum = 0, wsum = 0;
     agree.forEach(function (g) { sum += g.a * g.f; wsum += g.f; });
     var angle = sum / wsum;
-    if (!(Math.abs(angle) <= 15)) return none;
+    if (!(Math.abs(angle) <= 15)) return big();
     return { angle: angle, edges: agree.length };
+  }
+
+  /* 크게 기운 사진(약 12~45°): 줄마다 양 끝 내용 픽셀로 윤곽 점을 모아 볼록 껍질을 만들고,
+   * 회전 캘리퍼스로 넓이가 가장 작은 사각형을 찾아 그 각도를 쓴다. 껍질이 사각형을 90% 이상
+   * 채울 때(= 테두리가 곧은 사진)만 믿는다. 작은 각도는 위의 변 맞추기가 더 정밀하므로 쓰지 않는다. */
+  function estimateSkewHull(a, box, T) {
+    var none = { angle: 0, edges: 0 };
+    var dm = a.dmap, W = a.w, x0 = box.x0, y0 = box.y0, x1 = box.x1, y1 = box.y1;
+    var pts = [], x, y, k;
+    function solid(k, step) { return dm[k] > T && dm[k + step] > T && dm[k + 2 * step] > T; }
+    var ystep = Math.max(1, Math.floor((y1 - y0 + 1) / 1500));
+    for (y = y0; y <= y1; y += ystep) {
+      var base = y * W, lx = -1, rx = -1;
+      for (x = x0; x <= x1 - 2; x++) { if (solid(base + x, 1)) { lx = x; break; } }
+      if (lx < 0) continue;
+      for (x = x1; x >= lx + 2; x--) { if (solid(base + x, -1)) { rx = x; break; } }
+      pts.push([lx, y]); if (rx >= 0) pts.push([rx, y]);
+    }
+    if (pts.length < 20) return none;
+    // 볼록 껍질 (monotone chain)
+    pts.sort(function (p, q) { return p[0] - q[0] || p[1] - q[1]; });
+    function cross(o, p, q) { return (p[0] - o[0]) * (q[1] - o[1]) - (p[1] - o[1]) * (q[0] - o[0]); }
+    var lower = [], upper = [], i;
+    for (i = 0; i < pts.length; i++) { while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], pts[i]) <= 0) lower.pop(); lower.push(pts[i]); }
+    for (i = pts.length - 1; i >= 0; i--) { while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], pts[i]) <= 0) upper.pop(); upper.push(pts[i]); }
+    var hull = lower.slice(0, -1).concat(upper.slice(0, -1));
+    if (hull.length < 4) return none;
+    var hullArea = 0;
+    for (i = 0; i < hull.length; i++) { var p = hull[i], q = hull[(i + 1) % hull.length]; hullArea += p[0] * q[1] - q[0] * p[1]; }
+    hullArea = Math.abs(hullArea) / 2;
+    // 회전 캘리퍼스: 껍질의 각 변 방향마다 외접 사각형 넓이
+    var best = Infinity, bestTh = 0;
+    for (i = 0; i < hull.length; i++) {
+      var e0 = hull[i], e1 = hull[(i + 1) % hull.length];
+      var th = Math.atan2(e1[1] - e0[1], e1[0] - e0[0]), c = Math.cos(th), sn = Math.sin(th);
+      var minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity;
+      for (k = 0; k < hull.length; k++) {
+        var u = hull[k][0] * c + hull[k][1] * sn, v = -hull[k][0] * sn + hull[k][1] * c;
+        if (u < minU) minU = u; if (u > maxU) maxU = u; if (v < minV) minV = v; if (v > maxV) maxV = v;
+      }
+      var area = (maxU - minU) * (maxV - minV);
+      if (area < best) { best = area; bestTh = th; }
+    }
+    if (!(best > 0) || hullArea / best < 0.9) return none;
+    var deg = bestTh * 180 / Math.PI;
+    deg = ((deg % 90) + 90) % 90; // 0~90
+    if (deg > 45) deg -= 90;      // -45~45 (시계 방향 +)
+    if (Math.abs(deg) < 12) return none; // 작은 각도는 변 맞추기 결과를 믿는다
+    return { angle: deg, edges: 1, method: 'hull' };
   }
 
   // 기울기 보정 후 캔버스 크기와 그리기(워커와 메인 스레드가 함께 쓴다 — 바깥 변수 참조 금지)
