@@ -310,23 +310,57 @@
 
     // 3) 변 깎기: 매번 네 변의 '흰 틈 점수'를 매겨 가장 나쁜 변만 한 줄 깎는다.
     //    (한 변을 깎으면 옆 변 끝의 흰 픽셀도 함께 사라지므로, 동시에 깎으면 과하게 잘린다)
-    function score(start, step, len, inner) {
-      var p = 0, sum = 0, isum = 0, i, k = start, j = inner;
-      for (i = 0; i < len; i++, k += step, j += step) {
-        var v = dm[k];
-        if (v <= paperT) p++;
-        sum += v; isum += dm[j];
+    //    깎는 것은 ① 흰 쐐기(줄 끝에서 이어진 '종이 그 자체'의 흰 띠가 안쪽 줄로 갈수록 짧아짐 — 기운 모서리)
+    //    ② 줄 전체가 종이인 띠 ③ 옅은 경계선(3줄 안쪽보다 확 옅음)뿐이다.
+    //    사진 속 밝은 옷 · 바닥 · 모래 · 하늘은 '종이보다 조금이라도 진하거나' 안쪽에서도 길이가 같아 깎지 않는다.
+    var psum = 0, pn = 0;
+    for (y = 0; y < H; y += 6) {
+      var prow = y * W, pinY = y >= y0 - 4 && y <= y1 + 4;
+      for (x = 0; x < W; x += 6) {
+        if (pinY && x >= x0 - 4 && x <= x1 + 4) continue;
+        var pv = dm[prow + x]; if (pv <= 30) { psum += pv; pn++; }
       }
-      var rs = 0, re = 0;
-      for (i = 0, k = start; i < len && dm[k] <= T; i++, k += step) rs++;
-      for (i = 0, k = start + (len - 1) * step; i < len && dm[k] <= T; i++, k -= step) re++;
+    }
+    var paperMean = pn ? psum / pn : 0.5, pureT = paperMean + 1.0; // 종이 그 자체로 볼 평균 상한(JPEG 잡티 허용, 하늘 평균 1.5↑보다 낮게)
+    var pW = Math.max(8, Math.min(paperT, lvl + 2));                  // 흰 띠로 볼 픽셀(보정 · JPEG로 번진 쐐기 포함 — 쐐기 판정은 '안쪽으로 확 줄어듦'이 막아 줌)
+    // 줄 끝에서 이어진 흰 띠의 길이(사이에 낀 잡티 1~2픽셀은 건너뜀)
+    function oneRun(k, step, len) {
+      var n = 0, gap = 0, best = 0;
+      for (var i = 0; i < len; i++, k += step) {
+        if (dm[k] <= pW) { n++; gap = 0; best = n; }
+        else if (++gap <= 2 && n > 0) n++;
+        else break;
+      }
+      return best;
+    }
+    function endRuns(start, step, len) { return { s: oneRun(start, step, len), e: oneRun(start + (len - 1) * step, -step, len) }; }
+    // 쐐기 판정: 끝 흰 띠 길이를 0 · 3 · 6줄 안쪽에서 재어, 일정하게(곧은 빗변) 크게 줄어들 때만 쐐기로 본다.
+    // 기운 사진 모서리의 흰 쐐기는 빗변이 곧아 줄어드는 양이 일정하고, 하늘 · 바닥 · 옷은 거의 안 줄거나 들쭉날쭉하다.
+    function wedgeLen(r0, r1, r2, len) {
+      if (r0 <= 0) return 0;
+      var d1 = r0 - r1, d2 = r1 - r2, m = Math.max(4, len * 0.015);
+      if (d1 < Math.min(m, r0)) return 0;
+      if (r1 === 0) return r0;
+      if (r2 === 0 && d2 > 0) return r0;
+      if (r1 <= 0.6 * r0) return r0;                          // 3줄 만에 40% 넘게 줄면 쐐기(얕은 쐐기 · 잡티로 끊긴 빗변)
+      if (d2 < 0.5 * d1 || d2 > 2 * d1) return 0;             // 줄어드는 양이 들쭉날쭉 → 사진 속 밝은 부분
+      return r0;
+    }
+    function score(start, step, len, inner) {
+      var sum = 0, isum = 0, p = 0, pi = 0, i, k = start, j = inner, inner2 = inner + (inner - start);
+      for (i = 0; i < len; i++, k += step, j += step) {
+        sum += dm[k]; isum += dm[j];
+        if (dm[k] <= pW) p++;
+        if (dm[j] <= pW) pi++;
+      }
+      if (p >= len) return sum / len <= pureT ? 1 : 0; // 줄 전체가 흰색: 종이면 깎고, 하늘처럼 살짝 진하면 둔다
+      var r = endRuns(start, step, len), ri = endRuns(inner, step, len), r2 = endRuns(inner2, step, len);
+      var wedge = wedgeLen(r.s, ri.s, r2.s, len) + wedgeLen(r.e, ri.e, r2.e, len);
+      // 줄의 40% 이상이 거의 순수한 흰색인데 3줄 안쪽은 확 줄면(70% 이하) — JPEG 잡티로 흰 띠가 끊긴 기운 모서리
+      if (!wedge && p >= 0.4 * len && pi <= 0.7 * p) wedge = p;
       var pale = sum < 0.6 * isum;
-      var bad = p > Math.max(1, len * 0.01) ||
-        dm[start] <= paperT || dm[start + (len - 1) * step] <= paperT || // 줄 끝이 종이색(쐐기 끝)
-        rs + re >= Math.max(3, len * 0.01) ||
-        pale;
-      if (!bad) return 0;
-      return (p + rs + re) / len + (pale ? 1 - sum / Math.max(1, isum) : 0) + 1e-9;
+      if (!wedge && !pale) return 0;
+      return wedge / len + (pale ? 1 - sum / Math.max(1, isum) : 0) + 1e-9;
     }
     var capX = Math.max(2, Math.ceil(bw * 0.06)), capY = Math.max(2, Math.ceil(bh * 0.06));
     for (var guard = 0; guard < 4 * (capX + capY) && x1 - x0 >= 8 && y1 - y0 >= 8; guard++) {
@@ -556,6 +590,12 @@
       var inner = means.slice(0, means.length - 1);
       var sorted = inner.slice().sort(function (p, q) { return p - q; }), med = sorted[sorted.length >> 1];
       var edgeT = Math.max(5, med * 2.5);
+      // 띠가 종이보다 확실히 진하면(밝은 바닥 · 옅은 하늘, 그림자 수준 이상) 경계선이 없어도 사진으로 본다
+      if (med >= Math.max(6, thr * 3)) return inner.length >= minExt ? inner.length : 0;
+      // 아주 밝은 바닥(d≈3~6)도, 사진 끝에서 종이로 '뚝' 떨어지면(마지막 줄이 종이보다 4배 이상 진함) 사진으로 본다.
+      // 그림자 · 스캐너 가장자리는 서서히 옅어지므로 여기에 걸리지 않는다.
+      var lastIn = inner[inner.length - 1], paperLine = means[means.length - 1];
+      if (med >= Math.max(3, thr * 2.5) && lastIn >= 3 && lastIn >= 4 * Math.max(0.25, paperLine)) return inner.length >= minExt ? inner.length : 0;
       // 종이 바로 앞 몇 줄 안에 경계선(주변보다 확실히 진한 줄)이 있어야 한다
       for (var j = inner.length - 1; j >= Math.max(0, inner.length - 4); j--) {
         // 경계선까지 포함. 다만 몇 px짜리(옅은 경계 · JPEG 울림)는 하늘이 아니므로 무시(다듬기가 처리)
@@ -586,14 +626,9 @@
     if (rawBox && opts.trim) {
       var ef = extendFaint(a, rawBox);
       extended = ef.extended;
-      if (extended) {
-        // 날아간 하늘을 되살렸다면, 다듬기는 하늘을 종이로 오인해 깎아 버리므로 하지 않는다
-        // (넓히기가 이미 사진을 자른 경계선에서 멈춘다)
-        box = ef.box;
-      } else {
-        var rf = refineBox(a, rawBox, opts.threshold, !!opts.photo);
-        box = rf.box; refined = rf.applied;
-      }
+      // 다듬기는 종이 그 자체(흰 쐐기 · 종이 띠 · 옅은 경계선)만 깎으므로, 되살린 하늘 · 밝은 바닥은 건드리지 않는다
+      var rf = refineBox(a, ef.box, opts.threshold, !!opts.photo || extended);
+      box = rf.box; refined = rf.applied;
     }
     var empty = !box;
     var rbox = empty ? { x0: 0, y0: 0, x1: rs.w - 1, y1: rs.h - 1 } : rotateBox(box, a.w, a.h, rot);

@@ -237,16 +237,16 @@
       return { pass: near(r.plan.box, want, 2), detail: '상자 ' + boxStr(r.plan.box) + ' (기대 ' + boxStr(want) + ')' };
     });
 
-    test('살짝 기운 사진(1.5°): 결과 가장자리에 흰 틈 없음', async function () {
+    test('살짝 기운 사진(1.5°): 기본 설정이면 결과 가장자리에 흰 틈 없음', async function () {
       var c = canvas(1400, 1800, function (ctx) {
         ctx.translate(500, 600); ctx.rotate(1.5 * Math.PI / 180);
         drawPhoto(ctx, -380, -480, 760, 1000, 21);
       });
       var bmp = await jpegRoundTrip(c, 0.85);
-      var on = await crop(bmp, { trim: true });
-      var off = await crop(bmp, { trim: false });
+      var on = await cropDeskew(bmp, { trim: true });               // 기본 설정(기울기 보정 켬)
+      var off = await crop(bmp, { trim: false, deskew: false });
       var eOn = edgePaperRatio(on.out, 10), eOff = edgePaperRatio(off.out, 10);
-      return { pass: on.plan.refined && eOn === 0 && eOff > 0.05,
+      return { pass: eOn <= 0.002 && eOff > 0.05,
         detail: '다듬기 켬: 종이색 ' + (eOn * 100).toFixed(2) + '% (' + on.out.width + '×' + on.out.height + ') / 끔: ' + (eOff * 100).toFixed(2) + '% (' + off.out.width + '×' + off.out.height + ')',
         thumbs: [previewWithBox(c, on.plan), thumb(on.out), thumb(off.out)] };
     });
@@ -450,6 +450,33 @@
       var r = await crop(await jpegRoundTrip(c, 0.92));
       var R = r.plan.rect, ok = Math.abs(R.x - 200) <= 3 && Math.abs(R.y - 150) <= 3 && Math.abs(R.w - 1100) <= 6 && Math.abs(R.h - 800) <= 6;
       return { pass: ok && r.plan.extended, detail: '결과 (' + R.x + ',' + R.y + ') ' + R.w + '×' + R.h + ' (정답 (200,150) 1100×800), 하늘 되살림 ' + (r.plan.extended ? '적용' : '안 됨'), thumbs: [thumb(r.out)] };
+    });
+
+    test('크롭이 사진을 침범하지 않음: 밝은 바닥 · 가장자리의 흰 옷', async function () {
+      var r0 = rng(12);
+      // ① 위는 어두운 건물, 아래 45%는 아주 밝은 바닥(d≈4~14), 경계선 없음
+      var g = canvas(1654, 2338, function (ctx) {
+        var x0 = 120, y0 = 140, pw = 1300, ph = 980, top = Math.round(ph * 0.55);
+        drawPhoto(ctx, x0, y0, pw, top, 44);
+        var im = ctx.getImageData(x0, y0 + top, pw, ph - top), d = im.data, rows = ph - top;
+        for (var y = 0; y < rows; y++) for (var x = 0; x < pw; x++) {
+          var i = (y * pw + x) * 4, dd = 14 - 10 * y / rows + (r0() - 0.5) * 3;
+          d[i] = 255 - dd; d[i + 1] = 255 - dd * 0.6; d[i + 2] = 255;
+        }
+        ctx.putImageData(im, x0, y0 + top);
+        ctx.fillStyle = '#18181c'; ctx.fillRect(x0 + 600, y0 + top - 200, 100, 500);
+      });
+      // ② 반듯한 사진, 왼쪽 가장자리에 걸친 흰 옷(거의 흰색 큰 덩어리)
+      var c = canvas(1654, 2338, function (ctx) {
+        drawPhoto(ctx, 200, 200, 1000, 1300, 45);
+        ctx.fillStyle = 'rgb(252,253,253)'; ctx.fillRect(200, 600, 220, 500);
+      });
+      var rg = await crop(await jpegRoundTrip(g, 0.92)), rc = await crop(await jpegRoundTrip(c, 0.92));
+      var G = rg.plan.rect, C = rc.plan.rect;
+      var okG = Math.abs(G.x - 120) <= 3 && Math.abs(G.y - 140) <= 3 && Math.abs(G.w - 1300) <= 6 && Math.abs(G.h - 980) <= 6;
+      var okC = Math.abs(C.x - 200) <= 3 && Math.abs(C.y - 200) <= 3 && Math.abs(C.w - 1000) <= 6 && Math.abs(C.h - 1300) <= 6;
+      return { pass: okG && okC, detail: '밝은 바닥: (' + G.x + ',' + G.y + ') ' + G.w + '×' + G.h + ' (정답 (120,140) 1300×980) · 흰 옷: (' + C.x + ',' + C.y + ') ' + C.w + '×' + C.h + ' (정답 (200,200) 1000×1300)',
+        thumbs: [thumb(rg.out), thumb(rc.out)] };
     });
 
     function sameArray(a, b) {
