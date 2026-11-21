@@ -63,6 +63,40 @@ function deliverUpdate(status, only) {
   });
 }
 
+// 스캔 진행: { state: 'scanning' | 'page', page? }
+const scanSubscribers = [];
+let scanListening = false;
+
+function normalizeScanProgress(p) {
+  if (!p || typeof p !== 'object' || (p.state !== 'scanning' && p.state !== 'page')) return null;
+  const out = { state: p.state };
+  if (Number.isInteger(p.page) && p.page > 0) out.page = p.page;
+  return out;
+}
+
+function normalizeScanResult(r) {
+  if (!r || typeof r !== 'object') return { ok: false, error: '스캔하지 못했습니다.' };
+  const out = { ok: r.ok === true };
+  if (Array.isArray(r.files)) out.files = normalizeFiles(r.files);
+  if (typeof r.error === 'string' && r.error) out.error = r.error;
+  if (r.cancelled === true) out.cancelled = true;
+  return out;
+}
+
+function normalizeDevices(r) {
+  if (!r || typeof r !== 'object') return { ok: false, error: '스캐너 목록을 가져오지 못했습니다.' };
+  const out = { ok: r.ok === true };
+  if (Array.isArray(r.devices)) {
+    out.devices = r.devices.map((d) => ({
+      id: String(d.id), name: String(d.name), feeder: d.feeder === true, flatbed: d.flatbed === true
+    }));
+  }
+  if (typeof r.error === 'string' && r.error) out.error = r.error;
+  return out;
+}
+
+const errorText = (prefix, err) => prefix + ' ' + String((err && err.message) || err);
+
 contextBridge.exposeInMainWorld('autocroperNative', {
   isDesktop: true,
   version: readVersion(),
@@ -120,5 +154,41 @@ contextBridge.exposeInMainWorld('autocroperNative', {
 
   checkForUpdates: () => ipcRenderer.invoke('autocroper:update-check').then(() => undefined, () => undefined),
 
-  installUpdate: () => ipcRenderer.invoke('autocroper:update-install').then(() => undefined, () => undefined)
+  installUpdate: () => ipcRenderer.invoke('autocroper:update-install').then(() => undefined, () => undefined),
+
+  /* ── 스캐너 (Windows WIA) ── */
+  scanDevices: () => ipcRenderer.invoke('autocroper:scan-devices')
+    .then(normalizeDevices, (err) => ({ ok: false, error: errorText('스캐너 목록을 가져오지 못했습니다.', err) })),
+
+  scan: (opts) => {
+    if (!opts || typeof opts !== 'object') return Promise.resolve({ ok: false, error: '스캔 설정이 올바르지 않습니다.' });
+    const plain = { deviceId: opts.deviceId, source: opts.source, dpi: opts.dpi, color: opts.color };
+    return ipcRenderer.invoke('autocroper:scan', plain)
+      .then(normalizeScanResult, (err) => ({ ok: false, error: errorText('스캔하지 못했습니다.', err) }));
+  },
+
+  getScanSettings: () => ipcRenderer.invoke('autocroper:scan-settings').then((s) => s || null, () => null),
+
+  onScanProgress: (cb) => {
+    if (typeof cb !== 'function') return;
+    scanSubscribers.push(cb);
+    if (scanListening) return;
+    scanListening = true;
+    ipcRenderer.on('autocroper:scan-progress', (_event, p) => {
+      const st = normalizeScanProgress(p);
+      if (!st) return;
+      scanSubscribers.forEach((fn) => {
+        try { fn(Object.assign({}, st)); } catch (err) { console.error(err); }
+      });
+    });
+  },
+
+  cancelScan: () => ipcRenderer.invoke('autocroper:scan-cancel').then(() => undefined, () => undefined),
+
+  /* ── 감시 폴더 (새 스캔 파일은 onOpenFiles 로 들어온다) ── */
+  chooseWatchFolder: () => ipcRenderer.invoke('autocroper:choose-watch-folder').then((f) => f || null, () => null),
+
+  getWatchFolder: () => ipcRenderer.invoke('autocroper:get-watch-folder').then((f) => f || null, () => null),
+
+  stopWatch: () => ipcRenderer.invoke('autocroper:stop-watch').then(() => undefined, () => undefined)
 });

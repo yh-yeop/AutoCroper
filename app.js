@@ -2069,16 +2069,17 @@
       setScanStatus('스캔 중…');
       var t0 = performance.now();
       native.scan({ deviceId: sc.dev.value, source: sc.source, dpi: Number(sc.dpi.value), color: sc.color.value }).then(function (r) {
-        if (r && r.ok && r.files && r.files.length) {
-          addFiles(r.files.map(function (f) {
+        // 도중에 실패 · 취소해도 이미 받은 장은 연다
+        var got = (r && r.files) || [];
+        if (got.length) {
+          addFiles(got.map(function (f) {
             try { return new File([f.data], f.name, { type: f.type || 'image/png' }); } catch (_) { return null; }
           }).filter(Boolean));
-          setScanStatus(r.files.length + '쪽 스캔 완료 · ' + ((performance.now() - t0) / 1000).toFixed(0) + '초');
-        } else if (r && r.cancelled) {
-          setScanStatus('스캔을 취소했습니다.');
-        } else {
-          setScanStatus((r && r.error) || '스캔하지 못했습니다.');
         }
+        var secs = ((performance.now() - t0) / 1000).toFixed(0) + '초';
+        if (r && r.ok) setScanStatus(got.length + '쪽 스캔 완료 · ' + secs + (r.error ? ' · ' + r.error : ''));
+        else if (r && r.cancelled) setScanStatus('스캔을 취소했습니다.' + (got.length ? ' 받은 ' + got.length + '쪽은 열었습니다.' : ''));
+        else setScanStatus(((r && r.error) || '스캔하지 못했습니다.') + (got.length ? ' (받은 ' + got.length + '쪽은 열었습니다)' : ''));
       }).catch(function (err) {
         setScanStatus('스캔하지 못했습니다: ' + ((err && err.message) || err));
       }).then(function () {

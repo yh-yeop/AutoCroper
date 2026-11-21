@@ -74,6 +74,13 @@ jobs:
       - if: steps.v.outputs.build == 'true'
         run: npm ci
 
+      # 스캐너(WIA) PowerShell 스크립트를 진짜 powershell.exe 로 확인한다 (러너엔 스캐너가 없다).
+      # 구문 오류 · JSON 이 아닌 출력이면 실패, WIA 서비스가 없어서 생기는 깔끔한 오류 JSON 은 통과.
+      - name: 스캐너(WIA) 스크립트 확인
+        if: steps.v.outputs.build == 'true'
+        timeout-minutes: 10
+        run: node build/check-wia.js
+
       # --publish never 여도 build.publish 설정이 있으면 latest.yml · .blockmap 은 만들어진다.
       - name: 설치 파일 빌드 (NSIS x64)
         if: steps.v.outputs.build == 'true'

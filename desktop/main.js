@@ -7,8 +7,11 @@
 const { app, BrowserWindow, Menu, dialog, ipcMain, nativeTheme, protocol, session, shell } = require('electron');
 const fs = require('fs');
 const fsp = fs.promises;
+const os = require('os');
 const path = require('path');
 const { createUpdater } = require('./updater');
+const { createScanner, sanitizeScanSettings } = require('./scanner');
+const { createFolderWatcher } = require('./watch-folder');
 
 const SCHEME = 'app';
 const HOST = 'autocroper';
@@ -74,6 +77,18 @@ function main() {
   const updater = createUpdater({
     send: (status) => { if (win && !win.isDestroyed()) win.webContents.send('autocroper:update', status); }
   });
+  // 스캐너 직접 연결 (Windows WIA, powershell.exe). 패키징 전에만 AUTOCROPER_PWSH 로 실행 파일을 바꿔 시험할 수 있다.
+  const scanner = createScanner({
+    powershell: () => {
+      const override = process.env.AUTOCROPER_PWSH;
+      if (!app.isPackaged && override) return override;
+      if (process.platform !== 'win32') return null;
+      return path.join(process.env.SystemRoot || process.env.windir || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+    },
+    tempDir: () => { try { return app.getPath('temp'); } catch (_) { return os.tmpdir(); } }
+  });
+  // 감시 폴더: 새로 저장된 스캔 이미지를 파일 연결과 같은 통로(onOpenFiles)로 보낸다.
+  const folderWatcher = createFolderWatcher({ onFiles: (paths) => { openPaths(paths); } });
 
   /* ── 설정 (userData/settings.json) ──────────────────────── */
   const settingsPath = () => path.join(app.getPath('userData'), 'settings.json');
@@ -112,6 +127,18 @@ function main() {
     approvedFolders.add(folderKey(s.saveFolder));
     lastFolder = s.saveFolder;
     return s.saveFolder;
+  }
+
+  async function startWatching(folder) {
+    try { await folderWatcher.start(folder); return true; } catch (_) { return false; }
+  }
+
+  // 앱을 켤 때 저장해 둔 감시 폴더가 있으면 다시 감시한다.
+  async function resumeWatch() {
+    const s = await readSettings();
+    if (typeof s.watchFolder !== 'string' || !s.watchFolder || !path.isAbsolute(s.watchFolder)) return;
+    if (!(await isDirectory(s.watchFolder))) return;
+    await startWatching(s.watchFolder);
   }
 
   /* ── 파일 연결 · 명령줄로 받은 이미지 ───────────────────── */
@@ -317,6 +344,60 @@ function main() {
       return pendingFiles.splice(0, pendingFiles.length);
     });
 
+    /* 스캐너 */
+    ipcMain.handle('autocroper:scan-devices', async (event) => {
+      if (!fromMainWindow(event)) return { ok: false, error: '허용되지 않은 요청입니다.' };
+      return scanner.listDevices();
+    });
+
+    ipcMain.handle('autocroper:scan', async (event, opts) => {
+      if (!fromMainWindow(event)) return { ok: false, error: '허용되지 않은 요청입니다.' };
+      const sender = event.sender;
+      const plain = opts && typeof opts === 'object' && !Array.isArray(opts)
+        ? { deviceId: opts.deviceId, source: opts.source, dpi: opts.dpi, color: opts.color } : null;
+      const settings = sanitizeScanSettings(plain);
+      if (settings && settings.deviceId && Object.keys(settings).length === 4 && !scanner.busy()) {
+        try { await writeSettings({ scan: settings }); } catch (_) { /* 저장 못 해도 스캔은 한다 */ }
+      }
+      return scanner.scan(plain, (p) => {
+        if (!sender.isDestroyed()) sender.send('autocroper:scan-progress', p);
+      });
+    });
+
+    ipcMain.handle('autocroper:scan-settings', async (event) => {
+      if (!fromMainWindow(event)) return null;
+      return sanitizeScanSettings((await readSettings()).scan);
+    });
+
+    ipcMain.handle('autocroper:scan-cancel', (event) => {
+      if (!fromMainWindow(event)) return;
+      scanner.cancel();
+    });
+
+    /* 감시 폴더 */
+    ipcMain.handle('autocroper:choose-watch-folder', async (event) => {
+      if (!fromMainWindow(event)) return null;
+      const res = await dialog.showOpenDialog(win, {
+        title: '스캔 파일이 저장되는 폴더 선택',
+        buttonLabel: '이 폴더 감시',
+        defaultPath: folderWatcher.folder() || app.getPath('documents'),
+        properties: ['openDirectory', 'dontAddToRecent']
+      });
+      if (res.canceled || !res.filePaths || !res.filePaths[0]) return null;
+      const folder = path.resolve(res.filePaths[0]);
+      if (!(await startWatching(folder))) return null;
+      try { await writeSettings({ watchFolder: folder }); } catch (_) { /* 이번 실행에서만 감시 */ }
+      return folder;
+    });
+
+    ipcMain.handle('autocroper:get-watch-folder', (event) => (fromMainWindow(event) ? folderWatcher.folder() : null));
+
+    ipcMain.handle('autocroper:stop-watch', async (event) => {
+      if (!fromMainWindow(event)) return;
+      folderWatcher.stop();
+      try { await writeSettings({ watchFolder: undefined }); } catch (_) { /* 무시 */ }
+    });
+
     ipcMain.handle('autocroper:update-status', (event) => (fromMainWindow(event) ? updater.status() : null));
 
     ipcMain.handle('autocroper:update-check', async (event) => {
@@ -471,6 +552,12 @@ function main() {
     buildMenu();
     createWindow();
     openPaths(imagePathsFromArgv(process.argv, process.cwd()));
+    resumeWatch().catch(() => {});
+  });
+
+  app.on('will-quit', () => {
+    scanner.cancel();
+    folderWatcher.stop();
   });
 
   app.on('web-contents-created', (_e, contents) => {
