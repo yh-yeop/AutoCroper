@@ -1131,6 +1131,39 @@
     el.zip.disabled = !items.some(function (it) { return it.plan && !it.error; });
   }
 
+  /* 설치형 앱(PWA): Windows · macOS · Android의 Edge/Chrome에서 '앱으로 설치' */
+  var installBtn = $('#install-btn'), installEvt = null;
+  window.addEventListener('beforeinstallprompt', function (e) {
+    e.preventDefault();
+    installEvt = e;
+    if (installBtn) installBtn.hidden = false;
+  });
+  if (installBtn) installBtn.addEventListener('click', function () {
+    if (!installEvt) return;
+    installEvt.prompt();
+    installEvt.userChoice.then(function () { installEvt = null; installBtn.hidden = true; });
+  });
+  window.addEventListener('appinstalled', function () {
+    installEvt = null;
+    if (installBtn) installBtn.hidden = true;
+    setStatus('설치했습니다. 시작 메뉴에서 AutoCroper를 열 수 있습니다.');
+  });
+
+  // 설치한 앱에서 탐색기 '연결 프로그램 → AutoCroper'로 연 이미지 받기
+  if ('launchQueue' in window && window.launchQueue && typeof window.launchQueue.setConsumer === 'function') {
+    window.launchQueue.setConsumer(function (params) {
+      if (!params || !params.files || !params.files.length) return;
+      Promise.all(params.files.map(function (h) { return h.getFile(); })).then(addFiles);
+    });
+  }
+
+  // 오프라인 캐시(서비스 워커). file:// 등 지원하지 않는 곳에선 조용히 건너뛴다.
+  if ('serviceWorker' in navigator && window.isSecureContext) {
+    window.addEventListener('load', function () {
+      navigator.serviceWorker.register('sw.js').catch(function () { /* 무시 */ });
+    });
+  }
+
   syncOptionUI();
   refreshToolbar();
 })();

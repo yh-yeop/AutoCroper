@@ -21,6 +21,19 @@
 | 회전 | 0° | 0/90/180/270°, 크롭 전에 적용. 전체 일괄 + 카드별 ⟲ ⟳. |
 | 출력 포맷 | JPEG 92 | JPEG(품질 50~100) 또는 PNG. |
 
+## Windows에 설치 (설치형 웹앱)
+
+설치 파일 없이 Edge나 Chrome에서 바로 설치한다. 설치하면 시작 메뉴 · 작업 표시줄에 독립 창 앱으로 들어가고, **인터넷 없이도 동작**한다.
+
+1. Edge 또는 Chrome으로 https://yh-yeop.github.io/AutoCroper/ 를 연다.
+2. 화면 위의 **앱으로 설치** 버튼을 누른다. 버튼이 안 보이면 주소창 오른쪽의 설치 아이콘, 또는 메뉴(⋯) → **앱 → 이 사이트를 앱으로 설치**.
+3. 시작 메뉴에서 **AutoCroper**로 연다. 작업 표시줄 고정도 된다.
+4. 탐색기에서 이미지를 오른쪽 클릭 → **연결 프로그램 → AutoCroper**로 바로 열 수 있다(처음 한 번 허용 창이 뜬다).
+
+지우기: 시작 메뉴에서 AutoCroper를 오른쪽 클릭 → 제거, 또는 Windows 설정 → 앱.
+업데이트: 앱을 열 때 인터넷이 연결돼 있으면 자동으로 새 버전을 받는다.
+Microsoft Store용 패키지(MSIX)가 필요하면 [PWABuilder](https://www.pwabuilder.com/)에 주소를 넣어 만들 수 있다.
+
 ## 알고리즘
 
 1. 이미지를 Canvas에 그려 픽셀을 읽는다. 투명 영역은 흰색으로 합성.
@@ -58,14 +71,19 @@ python -m http.server 8000
 ## 파일
 
 ```
-index.html           화면
-style.css            모바일 우선 · 다크/라이트 자동
-app.js               크롭 코어(window.WhiteCrop) + UI. 워커 풀은 Blob URL로 생성
-test.html            알고리즘 테스트 페이지
-vendor/jszip.min.js  ZIP 생성(로컬 포함)
-.nojekyll            Pages에서 Jekyll 끄기
-LICENSE              MIT
+index.html             화면
+style.css              모바일 우선 · 다크/라이트 자동
+app.js                 크롭 코어(window.WhiteCrop) + UI. 워커 풀은 Blob URL로 생성
+manifest.webmanifest   설치형 앱 정보(이름 · 아이콘 · 탐색기 연결 프로그램)
+sw.js                  서비스 워커: 앱 파일 캐시로 오프라인 동작(이미지는 다루지 않음)
+icons/                 앱 아이콘(일반 · 마스크용 · 파비콘)
+test.html              알고리즘 테스트 페이지
+vendor/jszip.min.js    ZIP 생성(로컬 포함)
+.nojekyll              Pages에서 Jekyll 끄기
+LICENSE                MIT
 ```
+
+앱 파일을 고친 뒤에는 `sw.js`의 `VERSION`을 올려야 설치된 앱의 캐시가 확실히 바뀐다.
 
 ## 한계
 
