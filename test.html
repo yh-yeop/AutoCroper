@@ -302,7 +302,82 @@
       var t2 = performance.now();
       bmp.close();
       return { pass: sameBox(plan.box, { x0: 300, y0: 400, x1: 3499, y1: 5199 }) && (t1 - t0) < 15000,
-        detail: '분석 ' + Math.round(t1 - t0) + 'ms (' + (WC.usingWorker() ? 'Web Worker' : '메인 스레드') + '), 옵션 재계산 ' + (t2 - t1).toFixed(1) + 'ms' };
+        detail: '분석 ' + Math.round(t1 - t0) + 'ms (' + (WC.usingWorker() ? '워커 ' + WC.poolSize() + '개 병렬' : '메인 스레드') + '), 옵션 재계산 ' + (t2 - t1).toFixed(1) + 'ms' };
+    });
+
+    function sameArray(a, b) {
+      if (!a || !b || a.length !== b.length) return false;
+      for (var i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+      return true;
+    }
+    async function pixelsOf(blob) {
+      var bmp = await createImageBitmap(blob);
+      var c = canvas(bmp.width, bmp.height, function (ctx) { ctx.drawImage(bmp, 0, 0); });
+      return { w: bmp.width, h: bmp.height, data: c.getContext('2d').getImageData(0, 0, bmp.width, bmp.height).data };
+    }
+
+    test('병렬 분석: 띠 나눠 분석한 결과 = 통째로 분석한 결과', async function () {
+      var r0 = rng(17);
+      var c = canvas(3000, 4000, function (ctx) {
+        drawPhoto(ctx, 400, 500, 2100, 2900, 13);
+        ctx.fillStyle = '#666';
+        for (var i = 0; i < 300; i++) ctx.fillRect(Math.floor(r0() * 3000), Math.floor(r0() * 4000), 2, 2);
+      });
+      var bmp = await bitmapOf(c);
+      var one = await WC.analyzeBitmap(bmp, { bands: 1 });
+      var many = await WC.analyzeBitmap(bmp, { bands: 7 }); // 나누어떨어지지 않는 띠 수
+      var main = await WC.analyzeBitmap(bmp, { forceMain: true });
+      var ok = sameArray(one.rowCum, many.rowCum) && sameArray(one.colCum, many.colCum) && sameArray(one.dmap, many.dmap) &&
+        sameArray(one.rowCum, main.rowCum) && sameArray(one.colCum, main.colCum) && sameArray(one.dmap, main.dmap);
+      bmp.close();
+      return { pass: ok, detail: '띠 1개 · 7개 · 메인 스레드의 행/열 히스토그램과 차이 맵이 ' + (ok ? '모두 일치' : '다름') + ' (워커 ' + WC.poolSize() + '개)' };
+    });
+
+    test('워커 렌더 · 인코딩 = 메인 스레드 렌더 (픽셀 일치)', async function () {
+      var c = canvas(900, 700, function (ctx) {
+        drawPhoto(ctx, 100, 80, 600, 450, 8);
+        ctx.fillStyle = 'rgb(255,0,0)'; ctx.fillRect(100, 80, 30, 30);
+      });
+      var bmp = await bitmapOf(c);
+      var a = await WC.analyzeBitmap(bmp);
+      var ok = true, notes = [];
+      for (var rot of [0, 90, 180, 270]) {
+        var plan = WC.planCrop(a, opts({ rotation: rot, padding: 15 }));
+        var wb = await WC.renderBlob(bmp, rot, plan.rect, 'png');
+        var mb = await WC.canvasToBlob(WC.renderOutput(bmp, rot, plan.rect), 'png');
+        var p1 = await pixelsOf(wb), p2 = await pixelsOf(mb);
+        var same = p1.w === p2.w && p1.h === p2.h && sameArray(p1.data, p2.data);
+        ok = ok && same;
+        notes.push(rot + '° ' + p1.w + '×' + p1.h + (same ? '' : ' 다름'));
+      }
+      bmp.close();
+      return { pass: ok, detail: notes.join(' · ') };
+    });
+
+    test('여러 장 동시 처리: 순차 대비 속도', async function () {
+      var N = 8, bmps = [];
+      for (var i = 0; i < N; i++) {
+        bmps.push(await bitmapOf(canvas(2000, 2800, function (ctx) { drawPhoto(ctx, 150 + i * 10, 200, 1600, 2300, 30 + i); })));
+      }
+      var o = opts();
+      async function one(b) {
+        var a = await WC.analyzeBitmap(b, { bands: 1 });
+        var plan = WC.planCrop(a, o);
+        var blob = await WC.renderBlob(b, 0, plan.rect, 'jpeg', 0.92);
+        return plan.rect.w + 'x' + plan.rect.h + ':' + blob.size;
+      }
+      // 워커 풀을 미리 띄워 두고 잰다
+      await one(bmps[0]);
+      var t0 = performance.now(), seq = [];
+      for (var k = 0; k < N; k++) seq.push(await one(bmps[k]));
+      var t1 = performance.now();
+      var par = await Promise.all(bmps.map(one));
+      var t2 = performance.now();
+      bmps.forEach(function (b) { b.close(); });
+      var ts = t1 - t0, tp = t2 - t1;
+      var same = seq.join() === par.join();
+      return { pass: same && tp <= ts * 1.1,
+        detail: N + '장(2000×2800, 분석+JPEG 인코딩): 순차 ' + Math.round(ts) + 'ms → 동시 ' + Math.round(tp) + 'ms (×' + (ts / tp).toFixed(2) + ', 워커 ' + WC.poolSize() + '개)' + (same ? '' : ' · 결과 다름') };
     });
 
     test('메인 스레드 대체 경로도 같은 결과', async function () {

@@ -70,16 +70,33 @@
     return { w: w, h: h, rowCum: rowHist, colCum: colHist, dmap: dmap };
   }
 
+  // 워커 안에서 도는 코드. 작업 두 가지:
+  //  analyze — 이미지의 가로 띠 하나를 분석해 행 · 열 누적 히스토그램과 차이 맵을 돌려준다.
+  //  render  — 최종 결과를 그리고 JPEG/PNG로 인코딩해 Blob을 돌려준다.
   function workerMain() {
     self.onmessage = async function (e) {
       var msg = e.data, bmp = msg.bitmap;
       try {
         if (typeof OffscreenCanvas === 'undefined') throw new Error('no-offscreen');
-        var res = await buildHistograms(bmp, bmp.width, bmp.height,
-          function (w, h) { return new OffscreenCanvas(w, h); }, null);
-        bmp.close();
-        self.postMessage({ id: msg.id, ok: true, w: res.w, h: res.h, rowCum: res.rowCum, colCum: res.colCum, dmap: res.dmap },
-          [res.rowCum.buffer, res.colCum.buffer, res.dmap.buffer]);
+        if (msg.type === 'analyze') {
+          var res = await buildHistograms(bmp, bmp.width, bmp.height,
+            function (w, h) { return new OffscreenCanvas(w, h); }, null);
+          bmp.close();
+          self.postMessage({ id: msg.id, ok: true, rowCum: res.rowCum, colCum: res.colCum, dmap: res.dmap },
+            [res.rowCum.buffer, res.colCum.buffer, res.dmap.buffer]);
+        } else {
+          var r = msg.rect, c = new OffscreenCanvas(r.w, r.h), ctx = c.getContext('2d');
+          if (!ctx || typeof c.convertToBlob !== 'function') throw new Error('no-offscreen');
+          ctx.fillStyle = '#fff';
+          ctx.fillRect(0, 0, r.w, r.h);
+          ctx.imageSmoothingEnabled = false;
+          ctx.translate(-r.x, -r.y);
+          applyRotation(ctx, msg.srcW, msg.srcH, msg.rot);
+          ctx.drawImage(bmp, msg.sx, msg.sy); // 필요한 부분만 잘라 받은 원본을 제자리에
+          bmp.close();
+          var blob = await c.convertToBlob(msg.format === 'png' ? { type: 'image/png' } : { type: 'image/jpeg', quality: msg.quality });
+          self.postMessage({ id: msg.id, ok: true, blob: blob });
+        }
       } catch (err) {
         try { bmp.close(); } catch (_) { /* 무시 */ }
         self.postMessage({ id: msg.id, ok: false, error: String((err && err.message) || err) });
@@ -87,65 +104,129 @@
     };
   }
 
-  /* 워커: 별도 파일 없이 Blob URL로 만든다. 실패하면 메인 스레드에서 띠 단위로 쉬어 가며 처리. */
-  var worker = null, workerBroken = false, jobSeq = 0;
-  var pending = new Map();
+  /* 워커 풀: CPU 코어 수만큼(최대 8) 띄워 여러 이미지 · 한 이미지의 여러 띠를 동시에 처리한다.
+   * 별도 파일 없이 Blob URL로 만들고, 만들 수 없으면 메인 스레드에서 쉬어 가며 처리한다. */
+  var POOL_SIZE = Math.max(2, Math.min(8, ((typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || 4) - 1));
+  var pool = [], poolBroken = false, poolUrl = null, jobQueue = [], jobSeq = 0;
 
-  function getWorker() {
-    if (worker || workerBroken) return worker;
+  function ensurePool() {
+    if (pool.length || poolBroken) return;
     try {
-      if (typeof Worker === 'undefined' || typeof OffscreenCanvas === 'undefined') throw new Error('unsupported');
-      var src = [accumulateStrip, toSuffix, buildHistograms, workerMain]
-        .map(function (f) { return f.toString(); }).join('\n') + '\nworkerMain();';
-      var url = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
-      worker = new Worker(url);
-      worker.onmessage = function (e) {
-        var job = pending.get(e.data.id);
-        if (!job) return;
-        pending.delete(e.data.id);
-        if (e.data.ok) job.resolve({ w: e.data.w, h: e.data.h, rowCum: e.data.rowCum, colCum: e.data.colCum, dmap: e.data.dmap });
-        else job.reject(new Error(e.data.error));
-      };
-      worker.onerror = function () {
-        workerBroken = true; worker = null;
-        pending.forEach(function (job) { job.reject(new Error('worker-failed')); });
-        pending.clear();
-      };
+      if (typeof Worker === 'undefined' || typeof OffscreenCanvas === 'undefined' || typeof createImageBitmap !== 'function') throw new Error('unsupported');
+      if (!poolUrl) {
+        var src = [accumulateStrip, toSuffix, buildHistograms, applyRotation, workerMain]
+          .map(function (f) { return f.toString(); }).join('\n') + '\nworkerMain();';
+        poolUrl = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
+      }
+      for (var i = 0; i < POOL_SIZE; i++) pool.push(spawnWorker());
     } catch (_) {
-      workerBroken = true; worker = null;
+      pool.forEach(function (w) { w.terminate(); });
+      pool = []; poolBroken = true;
     }
-    return worker;
   }
+
+  function spawnWorker() {
+    var w = new Worker(poolUrl);
+    w.job = null;
+    w.onmessage = function (e) {
+      var job = w.job;
+      w.job = null;
+      if (job && job.id === e.data.id) {
+        if (e.data.ok) job.resolve(e.data);
+        else {
+          if (e.data.error === 'no-offscreen') breakPool();
+          job.reject(new Error(e.data.error));
+        }
+      }
+      pump();
+    };
+    w.onerror = function (ev) {
+      if (ev && ev.preventDefault) ev.preventDefault();
+      var job = w.job;
+      w.job = null;
+      w.terminate();
+      pool = pool.filter(function (x) { return x !== w; });
+      if (!pool.length) breakPool();
+      if (job) job.reject(new Error('worker-failed'));
+      pump();
+    };
+    return w;
+  }
+
+  function breakPool() {
+    poolBroken = true;
+    var q = jobQueue; jobQueue = [];
+    q.forEach(function (job) { job.reject(new Error('worker-failed')); });
+  }
+
+  function pump() {
+    for (var i = 0; i < pool.length && jobQueue.length; i++) {
+      var w = pool[i];
+      if (w.job) continue;
+      var job = jobQueue.shift();
+      job.id = job.msg.id = ++jobSeq;
+      w.job = job;
+      w.postMessage(job.msg, job.transfer);
+    }
+  }
+
+  function runJob(msg, transfer) {
+    return new Promise(function (resolve, reject) {
+      ensurePool();
+      if (poolBroken) { reject(new Error('worker-failed')); return; }
+      jobQueue.push({ msg: msg, transfer: transfer, resolve: resolve, reject: reject });
+      pump();
+    });
+  }
+
+  function workersAvailable() { ensurePool(); return !poolBroken; }
+  function isBitmap(b) { return typeof ImageBitmap !== 'undefined' && b instanceof ImageBitmap; }
 
   function nextFrame() { return new Promise(function (r) { setTimeout(r, 0); }); }
 
+  // 메인 스레드 대체 경로: 한 번에 한 장씩(메모리 · 반응성 보호)
+  var mainQueue = Promise.resolve();
   function analyzeOnMain(bitmap) {
-    return buildHistograms(bitmap, bitmap.width, bitmap.height, function (w, h) {
-      var c = document.createElement('canvas'); c.width = w; c.height = h; return c;
-    }, nextFrame);
+    var run = function () {
+      var w = bitmap.width || bitmap.naturalWidth, h = bitmap.height || bitmap.naturalHeight;
+      return buildHistograms(bitmap, w, h, function (cw, ch) {
+        var c = document.createElement('canvas'); c.width = cw; c.height = ch; return c;
+      }, nextFrame);
+    };
+    var p = mainQueue.then(run, run);
+    mainQueue = p.catch(function () { /* 다음 작업은 계속 */ });
+    return p;
   }
 
-  // 같은 워커를 순서대로 쓴다(이미지 여러 장을 동시에 메모리에 펼치지 않도록).
-  var queue = Promise.resolve();
+  // 큰 이미지는 가로 띠(약 150만 픽셀 이상씩, 최대 워커 수만큼)로 나눠 동시에 분석하고 합친다.
+  // 행 히스토그램은 띠마다 따로, 열 히스토그램은 띠별 결과의 합(누적합도 선형이라 그대로 더하면 됨).
   function analyzeBitmap(bitmap, opts) {
-    var forceMain = opts && opts.forceMain;
-    var run = function () {
-      var wk = forceMain ? null : getWorker();
-      if (!wk) return analyzeOnMain(bitmap);
-      return createImageBitmap(bitmap).then(function (copy) {
-        return new Promise(function (resolve, reject) {
-          var id = ++jobSeq;
-          pending.set(id, { resolve: resolve, reject: reject });
-          wk.postMessage({ id: id, bitmap: copy }, [copy]);
-        });
-      }).catch(function () {
-        workerBroken = true;
-        return analyzeOnMain(bitmap);
-      });
-    };
-    var p = queue.then(run, run);
-    queue = p.catch(function () { /* 다음 작업은 계속 */ });
-    return p;
+    if ((opts && opts.forceMain) || !isBitmap(bitmap) || !workersAvailable()) return analyzeOnMain(bitmap);
+    var W = bitmap.width, H = bitmap.height;
+    var bands = Math.max(1, Math.min(POOL_SIZE, Math.floor(W * H / 1500000), H));
+    if (opts && opts.bands) bands = Math.max(1, Math.min(opts.bands, H));
+    var bandH = Math.ceil(H / bands), parts = [];
+    for (var y = 0; y < H; y += bandH) parts.push(analyzeBand(bitmap, y, Math.min(bandH, H - y)));
+    return Promise.all(parts).then(function (res) { return mergeBands(res, W, H); })
+      .catch(function () { return analyzeOnMain(bitmap); });
+  }
+
+  function analyzeBand(bitmap, y, h) {
+    var src = (y === 0 && h === bitmap.height) ? createImageBitmap(bitmap) : createImageBitmap(bitmap, 0, y, bitmap.width, h);
+    return src.then(function (band) {
+      return runJob({ type: 'analyze', bitmap: band }, [band]);
+    }).then(function (r) { r.y = y; r.h = h; return r; });
+  }
+
+  function mergeBands(parts, W, H) {
+    if (parts.length === 1) return { w: W, h: H, rowCum: parts[0].rowCum, colCum: parts[0].colCum, dmap: parts[0].dmap };
+    var rowCum = new Uint32Array(H * NB), colCum = parts[0].colCum, dmap = new Uint8Array(W * H);
+    parts.forEach(function (p, i) {
+      rowCum.set(p.rowCum, p.y * NB);
+      dmap.set(p.dmap, p.y * W);
+      if (i > 0) { var c = p.colCum; for (var k = 0; k < c.length; k++) colCum[k] += c[k]; }
+    });
+    return { w: W, h: H, rowCum: rowCum, colCum: colCum, dmap: dmap };
   }
 
   // 노이즈 필터 단계(0~10) → 행/열 하나에 있어야 하는 최소 내용 픽셀 수.
@@ -325,6 +406,23 @@
     });
   }
 
+  // 최종 결과 Blob. 워커 풀에서 그리기 + 인코딩까지 해서 여러 장을 동시에 만든다.
+  // 원본 전체가 아니라 결과에 필요한 부분만 잘라 워커로 넘긴다.
+  function renderBlob(bitmap, rot, rect, format, quality) {
+    var onMain = function () {
+      var c = renderOutput(bitmap, rot, rect);
+      return canvasToBlob(c, format, quality).then(function (b) { c.width = c.height = 0; return b; });
+    };
+    if (!isBitmap(bitmap) || !workersAvailable()) return onMain();
+    var W = bitmap.width, H = bitmap.height, rs = rotatedSize(W, H, rot);
+    var ix0 = Math.max(0, rect.x), iy0 = Math.max(0, rect.y);
+    var ix1 = Math.min(rs.w, rect.x + rect.w) - 1, iy1 = Math.min(rs.h, rect.y + rect.h) - 1;
+    var src = rotateBox({ x0: ix0, y0: iy0, x1: ix1, y1: iy1 }, rs.w, rs.h, (360 - rot) % 360); // 회전 좌표 → 원본 좌표
+    return createImageBitmap(bitmap, src.x0, src.y0, src.x1 - src.x0 + 1, src.y1 - src.y0 + 1).then(function (part) {
+      return runJob({ type: 'render', bitmap: part, sx: src.x0, sy: src.y0, srcW: W, srcH: H, rot: rot, rect: rect, format: format, quality: quality }, [part]);
+    }).then(function (r) { return r.blob; }, onMain);
+  }
+
   function outputName(original, format) {
     var base = (original || 'image').replace(/\.[^./\\]+$/, '') || 'image';
     return base + '_crop.' + (format === 'png' ? 'png' : 'jpg');
@@ -343,9 +441,11 @@
     outputRect: outputRect,
     planCrop: planCrop,
     renderOutput: renderOutput,
+    renderBlob: renderBlob,
     canvasToBlob: canvasToBlob,
+    poolSize: function () { return workersAvailable() ? pool.length : 0; },
     outputName: outputName,
-    usingWorker: function () { return !!worker && !workerBroken; }
+    usingWorker: function () { return workersAvailable(); }
   };
 
   /* ───────────────────────── UI ───────────────────────── */
@@ -582,20 +682,26 @@
       it.w = w; it.h = h;
       var s = Math.min(1, PREVIEW_MAX / Math.max(w, h));
       var pw = Math.max(1, Math.round(w * s)), ph = Math.max(1, Math.round(h * s));
-      var pc = makeCanvas(pw, ph), pctx = pc.getContext('2d');
-      pctx.fillStyle = '#fff'; pctx.fillRect(0, 0, pw, ph);
-      pctx.imageSmoothingQuality = 'high';
-      pctx.drawImage(bmp, 0, 0, pw, ph);
-      it.preview = pc;
-      it.previewScale = s;
       setItemMsg(it, '여백 분석 중…', 'info');
-      updateItem(it); // 분석 전에도 원본은 먼저 보여 준다
+      // 분석(워커 풀)과 미리보기 축소(브라우저 내부 스레드)를 동시에 시작한다.
       var t0 = performance.now();
-      var source = bmp;
-      if (typeof ImageBitmap === 'undefined' || !(bmp instanceof ImageBitmap)) source = pc; // 극히 오래된 브라우저
-      return analyzeBitmap(source, { forceMain: source !== bmp }).then(function (a) {
+      var analysis = analyzeBitmap(bmp);
+      var small = (isBitmap(bmp) && s < 1)
+        ? createImageBitmap(bmp, { resizeWidth: pw, resizeHeight: ph, resizeQuality: 'high' }).catch(function () { return null; })
+        : Promise.resolve(null);
+      return small.then(function (sm) {
+        if (it.removed) { closeBitmap(sm); return analysis; }
+        var pc = makeCanvas(pw, ph), pctx = pc.getContext('2d');
+        pctx.fillStyle = '#fff'; pctx.fillRect(0, 0, pw, ph);
+        pctx.imageSmoothingQuality = 'high';
+        pctx.drawImage(sm || bmp, 0, 0, pw, ph);
+        closeBitmap(sm);
+        it.preview = pc;
+        it.previewScale = s;
+        updateItem(it); // 분석이 끝나기 전에도 원본은 먼저 보여 준다
+        return analysis;
+      }).then(function (a) {
         if (it.removed) return;
-        if (source !== bmp) a = scaleAnalysisNote(a, it);
         it.analysis = a;
         it.analyzeMs = performance.now() - t0;
         it.node.classList.remove('is-loading');
@@ -610,11 +716,6 @@
       it.ui.download.disabled = true;
       refreshToolbar();
     });
-  }
-  // createImageBitmap이 없는 환경에선 축소본으로 분석하므로 원본 좌표로 되돌리지 않는다(드묾).
-  function scaleAnalysisNote(a, it) {
-    it.w = a.w; it.h = a.h; it.bitmap = it.preview; it.previewScale = 1;
-    return a;
   }
 
   function closeBitmap(b) { if (b && typeof b.close === 'function') b.close(); }
@@ -741,12 +842,7 @@
 
   /* 내보내기 */
   function makeBlob(it) {
-    var plan = it.plan;
-    var canvas = renderOutput(it.bitmap, it.rot, plan.rect);
-    return canvasToBlob(canvas, opts.format, opts.quality / 100).then(function (blob) {
-      canvas.width = canvas.height = 0; // 메모리 바로 반환
-      return blob;
-    });
+    return renderBlob(it.bitmap, it.rot, it.plan.rect, opts.format, opts.quality / 100);
   }
 
   function saveBlob(blob, name) {
@@ -794,18 +890,24 @@
     if (!ready.length) return;
     if (typeof JSZip === 'undefined') { setStatus('ZIP 라이브러리를 불러오지 못했습니다.'); return; }
     el.zip.disabled = true;
-    var zip = new JSZip(), used = new Set(), failed = 0;
-    for (var i = 0; i < ready.length; i++) {
-      setStatus('ZIP 만드는 중… ' + (i + 1) + ' / ' + ready.length);
-      try {
-        var blob = await makeBlob(ready[i]);
-        zip.file(uniqueName(outputName(ready[i].name, opts.format), used), blob);
-      } catch (err) {
+    var zip = new JSZip(), used = new Set(), failed = 0, done = 0;
+    var format = opts.format;
+    setStatus('ZIP 만드는 중… 0 / ' + ready.length);
+    // 모든 이미지를 한꺼번에 요청하면 워커 풀이 코어 수만큼 동시에 그리고 인코딩한다.
+    var blobs = await Promise.all(ready.map(function (it) {
+      return makeBlob(it).then(function (b) { return b; }, function (err) {
         failed++;
-        setItemMsg(ready[i], errText(err), 'warn');
-      }
-      await nextFrame();
-    }
+        setItemMsg(it, errText(err), 'warn');
+        return null;
+      }).then(function (b) {
+        done++;
+        setStatus('ZIP 만드는 중… ' + done + ' / ' + ready.length);
+        return b;
+      });
+    }));
+    blobs.forEach(function (b, i) {
+      if (b) zip.file(uniqueName(outputName(ready[i].name, format), used), b);
+    });
     try {
       var out = await zip.generateAsync({ type: 'blob', compression: 'STORE' });
       saveBlob(out, 'crop_' + timestamp() + '.zip');
