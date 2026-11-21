@@ -1,8 +1,14 @@
 # AutoCroper · 흰 여백 자르기
 
-**바로 쓰기: https://yh-yeop.github.io/AutoCroper/**
+스캔본 · 흰 배경 사진의 흰 여백을 자동으로 잘라 내는 도구. 기울기 보정, 한 번에 여러 장 스캔한 파일 분리, 저장 폴더에 바로 저장까지 한다. **모든 처리는 이 기기 안에서만** 이뤄지고 이미지는 서버로 전송되지 않는다.
 
-스캔본 · 흰 배경 사진의 흰 여백을 자동으로 잘라 내는 정적 웹앱. 빌드 도구 없이 `index.html` + `style.css` + `app.js`만으로 동작하고, **모든 처리는 브라우저 Canvas 안에서만** 한다(이미지는 서버로 전송되지 않음).
+- **웹에서 바로 쓰기:** https://yh-yeop.github.io/AutoCroper/ (설치형 웹앱으로도 설치 가능)
+- **Windows 설치 파일:** [Releases](https://github.com/yh-yeop/AutoCroper/releases/latest) — 설치 폴더 선택 · 자동 업데이트
+- **소개:** https://yh-yeop.github.io/p/autocroper/
+
+![AutoCroper 화면](docs/screenshot.webp)
+
+빌드 도구 없이 `index.html` + `style.css` + `app.js`로 동작하는 정적 웹앱이고, 같은 파일을 Electron으로 감싸 Windows 설치 파일을 만든다.
 
 ## 사용법
 
