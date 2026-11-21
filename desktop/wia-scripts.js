@@ -18,7 +18,13 @@
  *   형식 GUID: BMP {B96B3CAB-...}, PNG {B96B3CAF-...}, JPEG {B96B3CAE-...} (-0728-11D3-9D7B-0000F81EF32E)
  *   속도를 위해 드라이버가 JPEG 전송을 지원하면 JPEG 로 받고(스캐너 쪽에서 압축 → 전송량 약 1/10),
  *   아니면 BMP 로 받아 변환 없이 그대로 넘긴다(앱이 BMP 를 바로 연다).
- *   (변환이 실패하면 BMP 그대로 둔다.) */
+ *   (변환이 실패하면 BMP 그대로 둔다.)
+ *
+ * 스크립트
+ *   LIST_DEVICES_PS1 · SCAN_PS1: 한 번 실행하고 끝나는 예전 방식 (세션을 못 쓸 때의 대비책)
+ *   SESSION_PS1: 앱이 켜져 있는 동안 계속 도는 PowerShell 하나. stdin 으로 한 줄에 JSON 명령 하나를 받고
+ *     stdout 으로 한 줄에 JSON 이벤트 하나를 쓴다. DeviceManager 와 연결한 Device 를 DeviceID 별로 들고 있어서
+ *     다음 스캔은 PowerShell 시작 · 장치 연결을 건너뛴다. 명령은 아래 SESSION_PS1 위 설명 참고. */
 
 const COMMON = String.raw`
 $ErrorActionPreference = 'Stop'
@@ -28,7 +34,10 @@ $script:Utf8 = New-Object System.Text.UTF8Encoding($false)
 $script:Out = New-Object System.IO.StreamWriter([Console]::OpenStandardOutput(), $script:Utf8)
 $script:Out.AutoFlush = $true
 
+# Session mode: every event carries the id of the command it answers.
+$script:CmdId = $null
 function Emit($obj) {
+  if ($null -ne $script:CmdId) { $obj['id'] = $script:CmdId }
   $script:Out.WriteLine((ConvertTo-Json -InputObject $obj -Compress -Depth 6))
 }
 
@@ -73,17 +82,19 @@ function Get-PropValue($props, [int]$id, $default) {
 }
 `;
 
-const LIST_DEVICES_PS1 = String.raw`# AutoCroper: WIA scanner list
-param([switch]$NoConnect)
-` + COMMON + String.raw`
-try {
-  $dm = New-Object -ComObject WIA.DeviceManager
-} catch {
-  Emit @{ ok = $false; stage = 'manager'; hresult = (Hex (Get-HResult $_)); message = (Get-ErrMessage $_) }
-  exit 0
-}
+// 연결이 끊겼거나 낡았다고 볼 수 있는 HRESULT: 세션이 캐시를 버리고 한 번 다시 연결해 다시 시도한다.
+//   WIA OFFLINE · BUSY · ITEM_DELETED · DEVICE_COMMUNICATION · S_NO_DEVICE_AVAILABLE · ERROR_NOT_READY,
+//   RPC_S_SERVER_UNAVAILABLE · RPC_S_CALL_FAILED · RPC_S_CALL_FAILED_DNE · RPC_E_DISCONNECTED · CO_E_OBJNOTCONNECTED
+//   (WIA 서비스가 다시 시작되면 들고 있던 COM 개체가 RPC 오류를 낸다)
+const STALE_CODES = [
+  '0x80210005', '0x80210006', '0x80210009', '0x8021000A', '0x80210015', '0x80070015',
+  '0x800706BA', '0x800706BE', '0x800706BF', '0x80010108', '0x800401FD'
+];
 
-try {
+// 장치 목록 (한 번 실행 · 세션 공용)
+const LIST_FUNCS = String.raw`
+# Scanner list. $cache (hashtable or $null) receives the connected Device objects by DeviceID.
+function Get-DeviceList($dm, [bool]$connect, $cache) {
   $list = @()
   foreach ($di in $dm.DeviceInfos) {
     try {
@@ -95,9 +106,10 @@ try {
       $feeder = $false
       $flatbed = $true
       $caps = $null
-      if (-not $NoConnect) {
+      if ($connect) {
         try {
           $dev = $di.Connect()
+          if ($null -ne $cache) { $cache[$id] = $dev }
           $caps = Get-PropValue $dev.Properties 3086 $null
         } catch { }
       }
@@ -109,6 +121,22 @@ try {
       $list += @{ id = $id; name = $name; feeder = $feeder; flatbed = $flatbed; caps = $caps }
     } catch { }
   }
+  return ,$list
+}
+`;
+
+const LIST_DEVICES_PS1 = String.raw`# AutoCroper: WIA scanner list
+param([switch]$NoConnect)
+` + COMMON + LIST_FUNCS + String.raw`
+try {
+  $dm = New-Object -ComObject WIA.DeviceManager
+} catch {
+  Emit @{ ok = $false; stage = 'manager'; hresult = (Hex (Get-HResult $_)); message = (Get-ErrMessage $_) }
+  exit 0
+}
+
+try {
+  $list = Get-DeviceList $dm (-not $NoConnect) $null
   Emit @{ ok = $true; devices = $list }
 } catch {
   Emit @{ ok = $false; stage = 'enum'; hresult = (Hex (Get-HResult $_)); message = (Get-ErrMessage $_) }
@@ -116,9 +144,8 @@ try {
 exit 0
 `;
 
-const SCAN_PS1 = String.raw`# AutoCroper: WIA scan
-param([string]$JobFile)
-` + COMMON + String.raw`
+// 스캔 (한 번 실행 · 세션 공용). Invoke-Scan 은 'scanning' · 'page' · 'done' 을 내고, 실패하면 throw 한다.
+const SCAN_FUNCS = String.raw`
 $FMT_BMP = '{B96B3CAB-0728-11D3-9D7B-0000F81EF32E}'
 $FMT_PNG = '{B96B3CAF-0728-11D3-9D7B-0000F81EF32E}'
 $FMT_JPEG = '{B96B3CAE-0728-11D3-9D7B-0000F81EF32E}'
@@ -165,11 +192,11 @@ function Set-Nearest($props, [int]$id, [int]$value) {
   return $null
 }
 
-function Save-Page($img, [int]$n) {
+function Save-Page($img, [string]$dir, [int]$n) {
   $fmt = ([string]$img.FormatID).ToUpper()
   $ext = 'bmp'
   if ($fmt -eq $FMT_JPEG) { $ext = 'jpg' } elseif ($fmt -eq $FMT_PNG) { $ext = 'png' }
-  $out = Join-Path $script:OutDir ('page_{0:D3}.{1}' -f $n, $ext)
+  $out = Join-Path $dir ('page_{0:D3}.{1}' -f $n, $ext)
   $img.SaveFile($out)
   return @{ file = [IO.Path]::GetFileName($out); format = $ext }
 }
@@ -183,27 +210,32 @@ function Pick-Format($item) {
   return $FMT_BMP
 }
 
-$page = 0
-try {
-  $job = Get-Content -LiteralPath $JobFile -Raw -Encoding UTF8 | ConvertFrom-Json
-  $deviceId = [string]$job.deviceId
+# Scan area (flatbed): the top part of the bed, full width. full = 1, top2_3 = 2/3, top1_2 = 1/2 of the height.
+function Scale-Area([int]$full, [string]$area) {
+  if ($area -eq 'top2_3') { return [int][Math]::Floor($full * 2 / 3) }
+  if ($area -eq 'top1_2') { return [int][Math]::Floor($full / 2) }
+  return $full
+}
+
+function Connect-ById($dm, [string]$id) {
+  foreach ($di in $dm.DeviceInfos) {
+    if ([string]$di.DeviceID -eq $id) { return ,($di.Connect()) }
+  }
+  return $null
+}
+
+# Configure the scan item from $job (source, dpi, color, area, outDir, maxPages) and transfer the pages.
+# $state.page counts saved pages (the caller reports it on error); $state.cached = device connection was reused.
+function Invoke-Scan($dev, $job, $state) {
   $source = [string]$job.source
   $dpi = [int]$job.dpi
   $color = [string]$job.color
-  $script:OutDir = [string]$job.outDir
+  $area = [string]$job.area
+  $outDir = [string]$job.outDir
   $maxPages = [int]$job.maxPages
   if ($maxPages -lt 1) { $maxPages = 1 }
   $feed = ($source -eq 'feeder')
-
-  $dm = New-Object -ComObject WIA.DeviceManager
-  $dev = $null
-  foreach ($di in $dm.DeviceInfos) {
-    if ([string]$di.DeviceID -eq $deviceId) { $dev = $di.Connect(); break }
-  }
-  if ($null -eq $dev) {
-    Emit @{ type = 'error'; stage = 'connect'; hresult = '0x80210015'; message = 'device not found' }
-    exit 0
-  }
+  if ($feed -or (-not $area)) { $area = 'full' }
 
   # Source (device level). Some drivers reject this; continue anyway.
   if ($feed) {
@@ -238,6 +270,7 @@ try {
   [void](Set-Prop $item.Properties 6150 0)
 
   # Full scan area: the item's maximum extent, or the bed / feeder size (1/1000 inch) x dpi / 1000.
+  # The area option keeps the full width and takes that fraction of the full height, from the top (YPOS 0).
   $wMax = Get-Max $item.Properties 6151
   $hMax = Get-Max $item.Properties 6152
   $bw = $null; $bh = $null
@@ -253,14 +286,24 @@ try {
   $wOk = $false; $hOk = $false
   if ($null -ne $wMax -and $wMax -gt 0) { $wOk = Set-Prop $item.Properties 6151 $wMax }
   if ((-not $wOk) -and $null -ne $wCalc) { $wOk = Set-Prop $item.Properties 6151 $wCalc }
-  if ($null -ne $hMax -and $hMax -gt 0) { $hOk = Set-Prop $item.Properties 6152 $hMax }
-  if ((-not $hOk) -and $null -ne $hCalc) { $hOk = Set-Prop $item.Properties 6152 $hCalc }
+  $hFull = $hMax
+  if ($null -eq $hFull -or $hFull -le 0) { $hFull = $hCalc }
+  $height = $null
+  foreach ($hf in @($hMax, $hCalc)) {
+    if ($hOk -or $null -eq $hf -or [int]$hf -le 0) { continue }
+    $h = Scale-Area ([int]$hf) $area
+    if (Set-Prop $item.Properties 6152 $h) { $hOk = $true; $height = $h; $hFull = [int]$hf }
+  }
+  if ((-not $hOk) -and $area -ne 'full' -and $null -ne $hFull -and [int]$hFull -gt 0) {
+    $h = Set-Nearest $item.Properties 6152 (Scale-Area ([int]$hFull) $area)
+    if ($null -ne $h) { $hOk = $true; $height = $h }
+  }
 
   $xferFmt = Pick-Format $item
-  Emit @{ type = 'scanning'; dpi = $xres; extent = ($wOk -and $hOk); format = $xferFmt }
+  Emit @{ type = 'scanning'; dpi = $xres; extent = ($wOk -and $hOk); format = $xferFmt; area = $area; height = $height; heightMax = $hFull; warm = ($state.cached -eq $true) }
 
-  while ($page -lt $maxPages) {
-    if ($feed -and $page -gt 0) {
+  while ($state.page -lt $maxPages) {
+    if ($feed -and $state.page -gt 0) {
       $st = Get-PropValue $dev.Properties 3087 $null
       if ($null -ne $st -and (([int]$st -band 1) -eq 0)) { break }
     }
@@ -269,24 +312,199 @@ try {
       $img = $item.Transfer($xferFmt)
     } catch {
       $hr = Hex (Get-HResult $_)
-      if ($feed -and $page -gt 0 -and $hr -eq $PAPER_EMPTY) { break }
+      if ($feed -and $state.page -gt 0 -and $hr -eq $PAPER_EMPTY) { break }
       # If the advertised format is rejected, retry once with BMP (first page only, so the feeder never pulls a sheet twice).
-      if ($page -eq 0 -and $xferFmt -ne $FMT_BMP) {
+      if ($state.page -eq 0 -and $xferFmt -ne $FMT_BMP) {
         $xferFmt = $FMT_BMP
         $img = $item.Transfer($xferFmt)
       } else { throw }
     }
     if ($null -eq $img) { break }
-    $page++
-    $saved = Save-Page $img $page
-    Emit @{ type = 'page'; page = $page; file = $saved.file; format = $saved.format }
+    $state.page = $state.page + 1
+    $saved = Save-Page $img $outDir $state.page
+    Emit @{ type = 'page'; page = $state.page; file = $saved.file; format = $saved.format }
     $img = $null
     if (-not $feed) { break }
   }
-  Emit @{ type = 'done'; pages = $page }
-} catch {
-  Emit @{ type = 'error'; stage = 'scan'; pages = $page; hresult = (Hex (Get-HResult $_)); message = (Get-ErrMessage $_) }
+  Emit @{ type = 'done'; pages = $state.page }
 }
+`;
+
+const SCAN_PS1 = String.raw`# AutoCroper: WIA scan
+param([string]$JobFile)
+` + COMMON + SCAN_FUNCS + String.raw`
+$state = @{ page = 0; cached = $false }
+try {
+  $job = Get-Content -LiteralPath $JobFile -Raw -Encoding UTF8 | ConvertFrom-Json
+  $dm = New-Object -ComObject WIA.DeviceManager
+  $dev = Connect-ById $dm ([string]$job.deviceId)
+  if ($null -eq $dev) {
+    Emit @{ type = 'error'; stage = 'connect'; hresult = '0x80210015'; message = 'device not found' }
+    exit 0
+  }
+  $null = Invoke-Scan $dev $job $state
+} catch {
+  Emit @{ type = 'error'; stage = 'scan'; pages = $state.page; hresult = (Hex (Get-HResult $_)); message = (Get-ErrMessage $_) }
+}
+exit 0
+`;
+
+/* 세션: 명령 (한 줄에 JSON 하나, 모든 명령에 숫자 id → 그 명령의 이벤트에 같은 id)
+ *   {"cmd":"list"}                → {type:'list', ok, devices | hresult, message}   (목록을 읽으며 연결한 장치는 캐시)
+ *   {"cmd":"warm","deviceId":...} → {type:'warm', ok, cached | hresult, message}    (연결해 캐시만 해 둔다)
+ *   {"cmd":"scan", deviceId, source, dpi, color, area, outDir, maxPages}
+ *                                 → 'scanning' · 'page'… · 'done' | 'error'  (+ 다시 연결할 때 'retry')
+ *   {"cmd":"ping"}                → {type:'pong'}
+ *   {"cmd":"quit"}                → {type:'bye'} 를 쓰고 exit 0. stdin 이 닫혀도(앱이 죽어도) exit 0.
+ * 시작하면 먼저 {type:'ready'} 를 쓴다. stdin 은 UTF-8 로 읽는다(그래도 scanner.js 는 ASCII 로만 보낸다). */
+const SESSION_PS1 = String.raw`# AutoCroper: WIA session (line-delimited JSON commands on stdin, events on stdout)
+param()
+` + COMMON + LIST_FUNCS + SCAN_FUNCS + String.raw`
+$script:In = New-Object System.IO.StreamReader([Console]::OpenStandardInput(), $script:Utf8)
+$script:Dm = $null
+$script:Devices = @{}
+$script:StaleCodes = @(` + STALE_CODES.map((c) => "'" + c + "'").join(', ') + String.raw`)
+
+function Test-Stale([string]$hr) { return ($script:StaleCodes -contains $hr) }
+
+function Get-Manager {
+  if ($null -eq $script:Dm) { $script:Dm = New-Object -ComObject WIA.DeviceManager }
+  return ,$script:Dm
+}
+
+# Forget connected devices; $all also drops the DeviceManager.
+function Reset-Cache([bool]$all) {
+  $script:Devices = @{}
+  if ($all) { $script:Dm = $null }
+}
+
+# Cached Device for this DeviceID, or connect and cache it. $null if there is no such device.
+function Get-Device([string]$id) {
+  if ($script:Devices.ContainsKey($id)) { return ,$script:Devices[$id] }
+  $dev = Connect-ById (Get-Manager) $id
+  if ($null -ne $dev) { $script:Devices[$id] = $dev }
+  return ,$dev
+}
+
+function Cmd-List($cmd) {
+  $retried = $false
+  while ($true) {
+    $hadMgr = ($null -ne $script:Dm)
+    try {
+      $dm = Get-Manager
+      $fresh = @{}
+      $list = Get-DeviceList $dm $true $fresh
+      $script:Devices = $fresh
+      Emit @{ type = 'list'; ok = $true; devices = $list }
+      return
+    } catch {
+      $hr = Hex (Get-HResult $_)
+      $msg = Get-ErrMessage $_
+      Reset-Cache $true
+      if ($hadMgr -and (-not $retried)) { $retried = $true; continue }
+      Emit @{ type = 'list'; ok = $false; stage = 'enum'; hresult = $hr; message = $msg }
+      return
+    }
+  }
+}
+
+function Cmd-Warm($cmd) {
+  $id = [string]$cmd.deviceId
+  $retried = $false
+  while ($true) {
+    $hadMgr = ($null -ne $script:Dm)
+    $cached = $script:Devices.ContainsKey($id)
+    try {
+      $dev = Get-Device $id
+      if ($null -ne $dev) {
+        # A cheap call on the cached object: throws if the connection is gone.
+        [void]$dev.Properties.Count
+        Emit @{ type = 'warm'; ok = $true; cached = $cached }
+        return
+      }
+      if ($hadMgr -and (-not $retried)) { $retried = $true; Reset-Cache $true; continue }
+      Emit @{ type = 'warm'; ok = $false; hresult = '0x80210015'; message = 'device not found' }
+      return
+    } catch {
+      $hr = Hex (Get-HResult $_)
+      $msg = Get-ErrMessage $_
+      Reset-Cache $true
+      if ($hadMgr -and (-not $retried)) { $retried = $true; continue }
+      Emit @{ type = 'warm'; ok = $false; hresult = $hr; message = $msg }
+      return
+    }
+  }
+}
+
+# On a stale-connection error before the first page: drop the cache, reconnect once and scan again.
+function Cmd-Scan($cmd) {
+  $id = [string]$cmd.deviceId
+  $state = @{ page = 0; cached = $false }
+  $retried = $false
+  while ($true) {
+    $hadMgr = ($null -ne $script:Dm)
+    $state.cached = $script:Devices.ContainsKey($id)
+    try {
+      $dev = Get-Device $id
+      if ($null -eq $dev) {
+        if ($hadMgr -and (-not $retried)) {
+          $retried = $true
+          Reset-Cache $true
+          Emit @{ type = 'retry'; stage = 'connect'; hresult = '0x80210015'; message = 'device not found' }
+          continue
+        }
+        Emit @{ type = 'error'; stage = 'connect'; pages = 0; hresult = '0x80210015'; message = 'device not found' }
+        return
+      }
+      $null = Invoke-Scan $dev $cmd $state
+      return
+    } catch {
+      $hr = Hex (Get-HResult $_)
+      $msg = Get-ErrMessage $_
+      $stale = Test-Stale $hr
+      if ($stale) { Reset-Cache $true }
+      if ($stale -and $hadMgr -and (-not $retried) -and $state.page -eq 0) {
+        $retried = $true
+        Emit @{ type = 'retry'; stage = 'scan'; hresult = $hr; message = $msg }
+        continue
+      }
+      Emit @{ type = 'error'; stage = 'scan'; pages = $state.page; hresult = $hr; message = $msg }
+      return
+    }
+  }
+}
+
+# Create the DeviceManager up front so the first command does not pay for it.
+try { $null = Get-Manager } catch { }
+Emit @{ type = 'ready'; version = 1; pid = $PID; wia = ($null -ne $script:Dm) }
+
+$quit = $false
+while (-not $quit) {
+  $line = $script:In.ReadLine()
+  if ($null -eq $line) { break }
+  $line = $line.Trim()
+  if (-not $line) { continue }
+  $script:CmdId = $null
+  $cmd = $null
+  try { $cmd = ConvertFrom-Json -InputObject $line } catch { $cmd = $null }
+  if ($null -eq $cmd -or $null -eq $cmd.cmd) {
+    Emit @{ type = 'error'; stage = 'command'; message = 'bad command' }
+    continue
+  }
+  if ($null -ne $cmd.id) { $script:CmdId = $cmd.id }
+  $name = [string]$cmd.cmd
+  try {
+    if ($name -eq 'list') { Cmd-List $cmd
+    } elseif ($name -eq 'warm') { Cmd-Warm $cmd
+    } elseif ($name -eq 'scan') { Cmd-Scan $cmd; [System.GC]::Collect()
+    } elseif ($name -eq 'ping') { Emit @{ type = 'pong' }
+    } elseif ($name -eq 'quit') { Emit @{ type = 'bye' }; $quit = $true
+    } else { Emit @{ type = 'error'; stage = 'command'; message = ('unknown command: ' + $name) } }
+  } catch {
+    Emit @{ type = 'error'; stage = 'command'; hresult = (Hex (Get-HResult $_)); message = (Get-ErrMessage $_) }
+  }
+}
+$script:CmdId = $null
 exit 0
 `;
 
@@ -311,4 +529,4 @@ function scriptBytes(text) {
   return Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(text.replace(/\r?\n/g, '\r\n'), 'utf8')]);
 }
 
-module.exports = { LIST_DEVICES_PS1, SCAN_PS1, PARSE_CHECK_PS1, scriptBytes };
+module.exports = { LIST_DEVICES_PS1, SCAN_PS1, SESSION_PS1, PARSE_CHECK_PS1, STALE_CODES, scriptBytes };

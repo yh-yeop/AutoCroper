@@ -10,7 +10,7 @@ const fsp = fs.promises;
 const os = require('os');
 const path = require('path');
 const { createUpdater } = require('./updater');
-const { createScanner, sanitizeScanSettings } = require('./scanner');
+const { createScanner, sanitizeScanSettings, validateScanOptions, isDeviceId } = require('./scanner');
 const { createFolderWatcher } = require('./watch-folder');
 
 const SCHEME = 'app';
@@ -87,6 +87,18 @@ function main() {
     },
     tempDir: () => { try { return app.getPath('temp'); } catch (_) { return os.tmpdir(); } }
   });
+  const PREWARM_DELAY = 3000; // 창이 뜬 뒤 이만큼 있다가 스캐너 세션을 켜고 기억해 둔 장치에 미리 연결
+
+  // 기억해 둔 장치 → 없으면 목록의 첫 장치(렌더러가 기본으로 고르는 것)에 미리 연결 (기다리지 않음)
+  async function warmRemembered(devices) {
+    const s = sanitizeScanSettings((await readSettings()).scan);
+    let id = s && s.deviceId;
+    if (Array.isArray(devices)) {
+      if (!devices.some((d) => d.id === id)) id = devices.length ? devices[0].id : null;
+    }
+    if (id) scanner.warm(id).catch(() => {});
+    else scanner.prewarm().catch(() => {});
+  }
   // 감시 폴더: 새로 저장된 스캔 이미지를 파일 연결과 같은 통로(onOpenFiles)로 보낸다.
   const folderWatcher = createFolderWatcher({ onFiles: (paths) => { openPaths(paths); } });
 
@@ -347,17 +359,27 @@ function main() {
     /* 스캐너 */
     ipcMain.handle('autocroper:scan-devices', async (event) => {
       if (!fromMainWindow(event)) return { ok: false, error: '허용되지 않은 요청입니다.' };
-      return scanner.listDevices();
+      const r = await scanner.listDevices();
+      // 렌더러는 시작할 때 목록을 받고 장치를 골라 둔다 → 그 장치에 미리 연결해 두면 첫 스캔이 빨라진다.
+      if (r && r.ok && r.devices && r.devices.length) warmRemembered(r.devices).catch(() => {});
+      return r;
+    });
+
+    // 사용자가 장치를 바꿨을 때 렌더러가 부른다. 연결이 끝나면(또는 실패하면) 끝난다. 결과는 알려 주지 않는다.
+    ipcMain.handle('autocroper:scan-warm', async (event, deviceId) => {
+      if (!fromMainWindow(event) || !isDeviceId(deviceId)) return;
+      await scanner.warm(deviceId);
     });
 
     ipcMain.handle('autocroper:scan', async (event, opts) => {
       if (!fromMainWindow(event)) return { ok: false, error: '허용되지 않은 요청입니다.' };
       const sender = event.sender;
       const plain = opts && typeof opts === 'object' && !Array.isArray(opts)
-        ? { deviceId: opts.deviceId, source: opts.source, dpi: opts.dpi, color: opts.color } : null;
-      const settings = sanitizeScanSettings(plain);
-      if (settings && settings.deviceId && Object.keys(settings).length === 4 && !scanner.busy()) {
-        try { await writeSettings({ scan: settings }); } catch (_) { /* 저장 못 해도 스캔은 한다 */ }
+        ? { deviceId: opts.deviceId, source: opts.source, dpi: opts.dpi, color: opts.color, area: opts.area } : null;
+      // area 는 없으면 'full'. 그 밖의 값이 하나라도 틀리면 scanner.scan 이 같은 검사로 거절한다.
+      const v = validateScanOptions(plain);
+      if (v.ok && !scanner.busy()) {
+        try { await writeSettings({ scan: v.value }); } catch (_) { /* 저장 못 해도 스캔은 한다 */ }
       }
       return scanner.scan(plain, (p) => {
         if (!sender.isDestroyed()) sender.send('autocroper:scan-progress', p);
@@ -508,7 +530,12 @@ function main() {
       }
     });
 
-    win.once('ready-to-show', () => { win.show(); updater.start(); });
+    win.once('ready-to-show', () => {
+      win.show();
+      updater.start();
+      // 스캐너 세션을 미리 켜 둔다 (렌더러가 그 전에 목록을 부르면 그때 이미 켜진다)
+      setTimeout(() => { warmRemembered(null).catch(() => {}); }, PREWARM_DELAY);
+    });
     win.on('page-title-updated', (e) => e.preventDefault()); // 창 제목은 항상 AutoCroper
     win.on('closed', () => { win = null; rendererReady = false; });
 
@@ -556,7 +583,8 @@ function main() {
   });
 
   app.on('will-quit', () => {
-    scanner.cancel();
+    // 진행 중인 스캔을 멈추고 세션 PowerShell 에 quit (2초 안에 안 끝나면 강제 종료; 앱이 먼저 끝나도 stdin 이 닫혀 스스로 끝난다)
+    scanner.shutdown().catch(() => {});
     folderWatcher.stop();
   });
 

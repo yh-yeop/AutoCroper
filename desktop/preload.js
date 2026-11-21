@@ -64,6 +64,7 @@ function deliverUpdate(status, only) {
 }
 
 // 스캔 진행: { state: 'scanning' | 'ready' | 'page', page? }
+// 스캔 결과: { ok, files?, error?, cancelled?, timing?: { setupMs, scanMs, totalMs, waitMs, warm, session } }
 const scanSubscribers = [];
 let scanListening = false;
 
@@ -80,8 +81,31 @@ function normalizeScanResult(r) {
   if (Array.isArray(r.files)) out.files = normalizeFiles(r.files);
   if (typeof r.error === 'string' && r.error) out.error = r.error;
   if (r.cancelled === true) out.cancelled = true;
+  const t = r.timing;
+  if (t && typeof t === 'object') {
+    const ms = (v) => (typeof v === 'number' && isFinite(v) && v >= 0 ? Math.round(v) : null);
+    out.timing = {
+      setupMs: ms(t.setupMs), scanMs: ms(t.scanMs), totalMs: ms(t.totalMs), waitMs: ms(t.waitMs),
+      warm: t.warm === true, session: t.session === true
+    };
+  }
   return out;
 }
+
+const SCAN_AREAS = ['full', 'top2_3', 'top1_2'];
+
+function normalizeScanSettings(s) {
+  if (!s || typeof s !== 'object') return null;
+  const out = {};
+  if (typeof s.deviceId === 'string' && s.deviceId) out.deviceId = s.deviceId;
+  if (s.source === 'flatbed' || s.source === 'feeder') out.source = s.source;
+  if (typeof s.dpi === 'number' && isFinite(s.dpi)) out.dpi = s.dpi;
+  if (s.color === 'color' || s.color === 'gray') out.color = s.color;
+  if (SCAN_AREAS.indexOf(s.area) >= 0) out.area = s.area;
+  return Object.keys(out).length ? out : null;
+}
+
+const isDeviceId = (v) => typeof v === 'string' && v.length > 0 && v.length <= 500 && !/[\u0000-\u001f\u007f]/.test(v);
 
 function normalizeDevices(r) {
   if (!r || typeof r !== 'object') return { ok: false, error: '스캐너 목록을 가져오지 못했습니다.' };
@@ -163,11 +187,18 @@ contextBridge.exposeInMainWorld('autocroperNative', {
   scan: (opts) => {
     if (!opts || typeof opts !== 'object') return Promise.resolve({ ok: false, error: '스캔 설정이 올바르지 않습니다.' });
     const plain = { deviceId: opts.deviceId, source: opts.source, dpi: opts.dpi, color: opts.color };
+    if (opts.area !== undefined) plain.area = opts.area; // 'full' | 'top2_3' | 'top1_2' (main 이 검사; 없으면 'full')
     return ipcRenderer.invoke('autocroper:scan', plain)
       .then(normalizeScanResult, (err) => ({ ok: false, error: errorText('스캔하지 못했습니다.', err) }));
   },
 
-  getScanSettings: () => ipcRenderer.invoke('autocroper:scan-settings').then((s) => s || null, () => null),
+  getScanSettings: () => ipcRenderer.invoke('autocroper:scan-settings').then(normalizeScanSettings, () => null),
+
+  // 장치를 바꿨을 때 미리 연결해 둔다 (다음 스캔이 연결을 건너뛴다). 끝나면 resolve, 실패해도 reject 하지 않는다.
+  warmScanner: (deviceId) => {
+    if (!isDeviceId(deviceId)) return Promise.resolve();
+    return ipcRenderer.invoke('autocroper:scan-warm', deviceId).then(() => undefined, () => undefined);
+  },
 
   onScanProgress: (cb) => {
     if (typeof cb !== 'function') return;

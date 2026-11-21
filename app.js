@@ -2592,7 +2592,12 @@
         // 어디서 느린지 보이게: 준비(스캐너 연결 · 설정) · 스캔 · 전송 · 불러오기
         var tEnd = performance.now(), f1 = function (ms) { return (ms / 1000).toFixed(1) + '초'; };
         var secs = f1(tEnd - t0);
-        if (sc.tReady && sc.tPage) secs += ' (준비 ' + f1(sc.tReady - t0) + ' · 스캔·전송 ' + f1(sc.tPage - sc.tReady) + ' · 불러오기 ' + f1(tEnd - sc.tPage) + ')';
+        var tm = r && r.timing;
+        if (tm && tm.setupMs != null && tm.scanMs != null) {
+          secs += ' (준비 ' + f1(tm.setupMs) + (tm.warm ? '·연결 유지됨' : '') + ' · 스캔·전송 ' + f1(tm.scanMs) + ' · 불러오기 ' + f1(Math.max(0, (tEnd - t0) - tm.setupMs - tm.scanMs - (tm.waitMs || 0))) + ')';
+        } else if (sc.tReady && sc.tPage) {
+          secs += ' (준비 ' + f1(sc.tReady - t0) + ' · 스캔·전송 ' + f1(sc.tPage - sc.tReady) + ' · 불러오기 ' + f1(tEnd - sc.tPage) + ')';
+        }
         if (r && r.ok) setScanStatus(got.length + '쪽 스캔 완료 · ' + secs + (r.error ? ' · ' + r.error : ''));
         else if (r && r.cancelled) setScanStatus('스캔을 취소했습니다.' + (got.length ? ' 받은 ' + got.length + '쪽은 열었습니다.' : ''));
         else setScanStatus(((r && r.error) || '스캔하지 못했습니다.') + (got.length ? ' (받은 ' + got.length + '쪽은 열었습니다)' : ''));

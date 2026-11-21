@@ -1,17 +1,28 @@
 'use strict';
 /* 스캐너 직접 연결 (Windows WIA). 네이티브 모듈 없이 powershell.exe 로 wia-scripts.js 의 스크립트를 돌린다.
- * Electron 에 기대지 않아 Node 만으로 시험할 수 있다. 실행 파일 경로 · 임시 폴더 · 시간 제한은 밖에서 넣는다. */
+ * Electron 에 기대지 않아 Node 만으로 시험할 수 있다. 실행 파일 경로 · 임시 폴더 · 시간 제한은 밖에서 넣는다.
+ *
+ * 속도: 스캔마다 PowerShell 을 새로 띄우고 장치에 다시 연결하면 그것만 몇 초가 든다. 그래서 '세션' 을 쓴다.
+ *  - PowerShell 하나(SESSION_PS1)를 계속 띄워 두고 stdin/stdout 으로 한 줄에 JSON 하나씩 주고받는다.
+ *    명령: {id, cmd:'list'} · {id, cmd:'warm', deviceId} · {id, cmd:'scan', ...job} · {id, cmd:'quit'}
+ *    이벤트: 시작하면 {type:'ready'}, 그 뒤로는 모두 명령의 id 를 달고 온다.
+ *  - 명령은 한 번에 하나만 보낸다(대기열). 장치 목록 · 스캔 · 미리 연결(warm) 모두 이 대기열을 지난다.
+ *  - 세션은 처음 쓸 때(또는 main 이 창을 띄우고 몇 초 뒤 prewarm/warm 으로) 켜고, 오래 안 쓰면 끈다.
+ *  - 세션이 켜지지 않거나 명령 도중 죽으면 예전처럼 스크립트를 한 번 실행하는 방식으로 대신한다.
+ *    (스캔은 'scanning' 전에 죽었을 때만 대신한다: 급지대가 종이를 두 번 끌어가지 않게.) 다음에 쓸 때 세션을 다시 켠다.
+ *  - 취소 · 시간 초과는 세션 프로세스를 죽인다. 세션은 다음에 쓸 때(취소 뒤에는 잠시 뒤 미리) 다시 켠다. */
 
 const fs = require('fs');
 const fsp = fs.promises;
 const path = require('path');
 const { spawn } = require('child_process');
 const { StringDecoder } = require('string_decoder');
-const { LIST_DEVICES_PS1, SCAN_PS1, scriptBytes } = require('./wia-scripts');
+const { LIST_DEVICES_PS1, SCAN_PS1, SESSION_PS1, scriptBytes } = require('./wia-scripts');
 
 const SOURCES = ['flatbed', 'feeder'];
 const DPIS = [150, 200, 300, 600];
 const COLORS = ['color', 'gray'];
+const AREAS = ['full', 'top2_3', 'top1_2'];   // 평판 스캔 범위: 전체 · 위쪽 2/3 · 위쪽 1/2 (폭은 항상 전체)
 const DEVICE_ID_MAX = 500;
 const MAX_PAGES = 100;
 
@@ -22,7 +33,13 @@ const DEFAULTS = {
   feederPerPage: 3 * 60 * 1000,       //   한 장 받을 때마다 '지금부터 3분' 으로 늘린다
   feederHardCap: 60 * 60 * 1000,      //   그래도 최대 60분
   fileBytes: 512 * 1024 * 1024,       // 한 장
-  totalBytes: 1024 * 1024 * 1024      // 한 번 스캔에서 렌더러로 보내는 합계
+  totalBytes: 1024 * 1024 * 1024,     // 한 번 스캔에서 렌더러로 보내는 합계
+  sessionStart: 30 * 1000,            // 세션 PowerShell 이 'ready' 를 낼 때까지
+  warmTimeout: 60 * 1000,             // 미리 연결(warm) 한 번
+  sessionIdle: 30 * 60 * 1000,        // 이만큼 안 쓰면 세션을 끈다 (다음에 쓸 때 다시 켠다)
+  quitTimeout: 2000,                  // quit 뒤 이만큼 기다렸다가 강제로 끝낸다
+  sessionMaxFailures: 2,              // 세션이 연달아 이만큼 켜지지 않으면 이번 실행 동안은 한 번 실행 방식만 쓴다
+  rewarmDelay: 1500                   // 취소로 세션을 죽인 뒤 이만큼 있다가 다시 켜서 장치에 미리 연결
 };
 
 const CANCELLED_MESSAGE = '스캔을 취소했습니다.';
@@ -31,13 +48,19 @@ const CANCELLED_MESSAGE = '스캔을 취소했습니다.';
 function validateScanOptions(o) {
   if (!o || typeof o !== 'object' || Array.isArray(o)) return { ok: false, error: '스캔 설정이 올바르지 않습니다.' };
   const { deviceId, source, dpi, color } = o;
+  const area = o.area === undefined ? 'full' : o.area;
   if (typeof deviceId !== 'string' || !deviceId || deviceId.length > DEVICE_ID_MAX || /[\u0000-\u001f\u007f]/.test(deviceId)) {
     return { ok: false, error: '스캐너를 먼저 선택해 주세요.' };
   }
   if (typeof source !== 'string' || SOURCES.indexOf(source) < 0) return { ok: false, error: '원고 위치(평판 · 급지대)가 올바르지 않습니다.' };
   if (typeof dpi !== 'number' || DPIS.indexOf(dpi) < 0) return { ok: false, error: '해상도는 150 · 200 · 300 · 600 dpi 중에서 골라 주세요.' };
   if (typeof color !== 'string' || COLORS.indexOf(color) < 0) return { ok: false, error: '색상(컬러 · 흑백)이 올바르지 않습니다.' };
-  return { ok: true, value: { deviceId, source, dpi, color } };
+  if (typeof area !== 'string' || AREAS.indexOf(area) < 0) return { ok: false, error: '스캔 범위(전체 · 위쪽 2/3 · 위쪽 1/2)가 올바르지 않습니다.' };
+  return { ok: true, value: { deviceId, source, dpi, color, area } };
+}
+
+function isDeviceId(v) {
+  return typeof v === 'string' && !!v && v.length <= DEVICE_ID_MAX && !/[\u0000-\u001f\u007f]/.test(v);
 }
 
 // settings.json 의 scan 값 → 올바른 항목만 남긴다 (없으면 null)
@@ -49,6 +72,7 @@ function sanitizeScanSettings(s) {
   if (SOURCES.indexOf(s.source) >= 0) out.source = s.source;
   if (DPIS.indexOf(s.dpi) >= 0) out.dpi = s.dpi;
   if (COLORS.indexOf(s.color) >= 0) out.color = s.color;
+  if (AREAS.indexOf(s.area) >= 0) out.area = s.area;
   return Object.keys(out).length ? out : null;
 }
 
@@ -170,17 +194,40 @@ function stamp(d) {
   return d.getFullYear() + pad2(d.getMonth() + 1) + pad2(d.getDate()) + '-' + pad2(d.getHours()) + pad2(d.getMinutes()) + pad2(d.getSeconds());
 }
 
+// 세션 stdin 으로 보내는 명령은 ASCII 만 쓴다 (한글 경로는 \uXXXX). PowerShell 쪽 입력 인코딩과 상관없이 안전하다.
+function encodeCommand(obj) {
+  return JSON.stringify(obj).replace(/[\u007f-￿]/g, (c) => '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0')) + '\n';
+}
+
+const PS_FLAGS = ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass'];
+const SESSION_PREFIX = 'autocroper-wia-session-';
+const noop = () => {};
+
 /* ── 스캐너 ───────────────────────────────────────────── */
 /**
  * @param {object} o
  * @param {() => (string|null)} o.powershell  실행할 powershell.exe 경로 (지원하지 않는 환경이면 null)
  * @param {() => string} o.tempDir            임시 폴더
  * @param {object} [o.limits]                 DEFAULTS 덮어쓰기 (시험용)
+ * @param {boolean} [o.session=true]          계속 띄워 두는 PowerShell 세션을 쓸지 (false 면 매번 스크립트를 실행)
  */
 function createScanner(o) {
   const limits = Object.assign({}, DEFAULTS, o.limits || {});
-  let job = null;            // 진행 중인 스캔 { child, cancelled }
+  const useSession = o.session !== false;
+  let job = null;            // 진행 중인 스캔 { kill, cancelled, mode: null | 'session' | 'oneshot', deviceId }
   let listing = null;        // 진행 중인 장치 목록 Promise
+  let sess = null;           // 지금 세션 (아래 startSession)
+  let sessFailures = 0;      // 세션이 연달아 켜지지 않은 횟수
+  let sweptOld = false;      // 지난 실행에서 남은 세션 폴더를 지웠는지
+  let queue = Promise.resolve(); // 스캐너 명령은 한 번에 하나
+  const warming = new Map(); // deviceId → 진행 중인 warm Promise
+  let lastDevice = null;     // 마지막으로 쓰거나 미리 연결한 장치 (취소 뒤 다시 미리 연결)
+  let closed = false;        // shutdown 뒤
+  let rewarmTimer = null;
+  let idleTimer = null;
+  let sessionsStarted = 0;
+
+  const unref = (t) => { if (t && typeof t.unref === 'function') t.unref(); return t; };
 
   async function makeWorkDir() {
     const base = o.tempDir();
@@ -197,8 +244,14 @@ function createScanner(o) {
     }
   }
 
+  function enqueue(fn) {
+    const p = queue.then(fn, fn);
+    queue = p.then(noop, noop);
+    return p;
+  }
+
   /**
-   * PowerShell 스크립트 실행. onEvent(obj) 는 JSON 줄마다.
+   * PowerShell 스크립트 한 번 실행. onEvent(obj) 는 JSON 줄마다.
    * → Promise<{ code, signal, stderr, timedOut, killed, events }>
    */
   function run(exe, scriptPath, args, { onEvent, onSpawn, timeout }) {
@@ -209,7 +262,7 @@ function createScanner(o) {
       let killed = false;
       let settled = false;
       let child;
-      const fullArgs = ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', scriptPath].concat(args);
+      const fullArgs = PS_FLAGS.concat(['-File', scriptPath]).concat(args);
       try {
         child = spawn(exe, fullArgs, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
       } catch (err) {
@@ -257,30 +310,259 @@ function createScanner(o) {
       (r.stderr ? ' ' + r.stderr.replace(/\s+/g, ' ').slice(0, 300) : '');
   }
 
+  /* ── 세션 (계속 띄워 두는 PowerShell) ───────────────────── */
+  // s.state: 'starting' → 'ready' → 'dead'
+  function startSession(exe) {
+    const s = { state: 'starting', child: null, dir: null, cmd: null, nextId: 1, stderr: '', killedByUs: false, code: null, signal: null, counted: false };
+    sessionsStarted++;
+    s.closed = new Promise((r) => { s.markClosed = r; });
+    s.ready = (async () => {
+      const base = o.tempDir();
+      await fsp.mkdir(base, { recursive: true });
+      let old = [];
+      if (!sweptOld) {
+        sweptOld = true;
+        try { old = (await fsp.readdir(base)).filter((n) => n.startsWith(SESSION_PREFIX)); } catch (_) { old = []; }
+      }
+      s.dir = await fsp.mkdtemp(path.join(base, SESSION_PREFIX));
+      // 지난 실행(앱이 갑자기 꺼진 경우)에서 남은 세션 폴더
+      for (const n of old) removeDir(path.join(base, n)).catch(noop);
+      const script = await writeScript(s.dir, 'session.ps1', SESSION_PS1);
+      if (s.killedByUs) throw new Error('stopped');
+      await new Promise((resolve, reject) => {
+        let child;
+        try {
+          child = spawn(exe, PS_FLAGS.concat(['-File', script]), { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+        } catch (err) { reject(err); return; }
+        s.child = child;
+        const timer = setTimeout(() => { reject(new Error('session start timeout')); killSession(s); }, limits.sessionStart);
+        s.onReady = () => { clearTimeout(timer); resolve(); };
+        s.onStartFail = (err) => { clearTimeout(timer); reject(err); };
+        child.stdin.on('error', noop); // 죽은 프로세스에 쓰면 EPIPE
+        const parser = createLineParser((obj) => onSessionEvent(s, obj));
+        child.stdout.on('data', (c) => parser.push(c));
+        child.stderr.on('data', (c) => { s.stderr = (s.stderr + c.toString('utf8')).slice(-8000); });
+        let ended = false;
+        const end = (code, signal, err) => {
+          if (ended) return;
+          ended = true;
+          parser.end();
+          s.code = code;
+          s.signal = signal;
+          if (err) s.stderr += String((err && err.message) || err);
+          onSessionClosed(s);
+        };
+        child.on('error', (err) => end(null, null, err));
+        child.on('close', (code, signal) => end(code, signal));
+      });
+    })();
+    s.ready.catch(() => { if (!s.child) onSessionClosed(s); }); // 프로세스를 띄우기도 전에 실패
+    return s;
+  }
+
+  function onSessionEvent(s, obj) {
+    if (s.state === 'starting') {
+      if (obj.type === 'ready') { s.state = 'ready'; s.info = obj; s.onReady(); }
+      return;
+    }
+    if (s.cmd && obj.id === s.cmd.id) s.cmd.onEvent(obj);
+  }
+
+  function onSessionClosed(s) {
+    if (s.state === 'dead') return;
+    const was = s.state;
+    s.state = 'dead';
+    if (sess === s) sess = null;
+    if (was === 'starting' && s.onStartFail) s.onStartFail(new Error('session exited (' + s.code + ') ' + s.stderr.trim().slice(0, 200)));
+    if (s.cmd) s.cmd.onDeath();
+    removeDir(s.dir).catch(noop);
+    s.markClosed();
+  }
+
+  function killSession(s) {
+    if (!s || s.state === 'dead') return;
+    s.killedByUs = true;
+    if (s.child) { try { s.child.kill('SIGKILL'); } catch (_) { /* 이미 끝남 */ } }
+  }
+
+  // quit 을 보내고 기다린다. 명령을 처리하는 중이거나 아직 켜지는 중이면 바로 죽인다.
+  function quitSession(s) {
+    if (!s) return Promise.resolve();
+    if (sess === s) sess = null;
+    if (s.state === 'dead') return s.closed;
+    if (s.state === 'ready' && !s.cmd) {
+      s.killedByUs = true;
+      try { s.child.stdin.write(encodeCommand({ id: 0, cmd: 'quit' })); s.child.stdin.end(); } catch (_) { /* 무시 */ }
+      const t = unref(setTimeout(() => killSession(s), limits.quitTimeout));
+      s.closed.then(() => clearTimeout(t));
+    } else {
+      killSession(s);
+    }
+    return s.closed;
+  }
+
+  function armIdle(s) {
+    clearTimeout(idleTimer);
+    idleTimer = unref(setTimeout(() => { if (sess === s && !s.cmd) quitSession(s); }, limits.sessionIdle));
+  }
+
+  // 켜져 있는 세션, 또는 새로 켠 세션. 쓸 수 없으면 null (그러면 한 번 실행 방식으로 대신한다).
+  async function getSession() {
+    if (!useSession || closed || sessFailures >= limits.sessionMaxFailures) return null;
+    const exe = o.powershell();
+    if (!exe) return null;
+    if (!sess) sess = startSession(exe);
+    const s = sess;
+    try {
+      await s.ready;
+    } catch (_) {
+      if (!s.killedByUs && !s.counted) { s.counted = true; sessFailures++; }
+      return null;
+    }
+    if (s.state !== 'ready') return null;
+    sessFailures = 0;
+    if (!s.cmd) armIdle(s);
+    return s;
+  }
+
+  /**
+   * 세션에 명령 하나. isTerminal(ev) 인 이벤트가 오면 끝. 시간이 지나면 세션을 죽인다.
+   * → Promise<{ events, timedOut, died, killed, code, signal, stderr, sentAt }>
+   */
+  function sessionCommand(s, cmd, { timeout, isTerminal, onEvent }) {
+    return new Promise((resolve) => {
+      const res = { events: [], timedOut: false, died: false, killed: false, code: null, signal: null, stderr: '', spawnError: false, sentAt: Date.now() };
+      if (!s || s.state !== 'ready' || s.cmd) { res.died = true; resolve(res); return; }
+      clearTimeout(idleTimer);
+      const id = s.nextId++;
+      let timer = null;
+      let deadline = 0;
+      let settled = false;
+      const arm = (ms) => {
+        clearTimeout(timer);
+        deadline = Date.now() + ms;
+        timer = setTimeout(() => { res.timedOut = true; killSession(s); }, Math.max(0, ms));
+      };
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (s.cmd && s.cmd.id === id) s.cmd = null;
+        if (s.state === 'ready' && sess === s) armIdle(s);
+        resolve(res);
+      };
+      s.cmd = {
+        id,
+        onEvent: (obj) => {
+          res.events.push(obj);
+          const next = timeout(obj, deadline);
+          if (typeof next === 'number') arm(next);
+          if (onEvent) { try { onEvent(obj); } catch (_) { /* 무시 */ } }
+          if (isTerminal(obj)) finish();
+        },
+        onDeath: () => {
+          res.died = true;
+          res.killed = s.killedByUs;
+          res.code = s.code;
+          res.signal = s.signal;
+          res.stderr = s.stderr.trim();
+          finish();
+        }
+      };
+      arm(timeout(null));
+      res.sentAt = Date.now();
+      try { s.child.stdin.write(encodeCommand(Object.assign({ id }, cmd))); } catch (_) { killSession(s); }
+    });
+  }
+
+  // 취소로 세션을 죽인 뒤: 잠시 있다가 세션을 다시 켜고 마지막 장치에 미리 연결해 둔다.
+  function scheduleRewarm() {
+    if (!useSession || closed) return;
+    clearTimeout(rewarmTimer);
+    rewarmTimer = unref(setTimeout(() => {
+      if (!closed && !job && lastDevice) warm(lastDevice).catch(noop);
+    }, limits.rewarmDelay));
+  }
+
+  /* 세션만 미리 켠다 → Promise<boolean> */
+  function prewarm() {
+    if (!useSession || closed || !o.powershell()) return Promise.resolve(false);
+    return getSession().then((s) => !!s, () => false);
+  }
+
+  /* 장치에 미리 연결해 둔다 (다음 스캔이 연결을 건너뛴다) → Promise<{ ok, cached?, error? }> (reject 하지 않음) */
+  function warm(deviceId) {
+    if (!isDeviceId(deviceId)) return Promise.resolve({ ok: false, error: '스캐너를 먼저 선택해 주세요.' });
+    lastDevice = deviceId;
+    if (!useSession || closed || !o.powershell()) return Promise.resolve({ ok: false, error: '스캐너 세션을 쓸 수 없습니다.' });
+    if (job) return Promise.resolve({ ok: false, error: '스캔하는 중입니다.' });
+    if (warming.has(deviceId)) return warming.get(deviceId);
+    const p = enqueue(async () => {
+      if (job && job.deviceId !== deviceId) return { ok: false, error: '다른 스캐너로 스캔하는 중입니다.' };
+      const s = await getSession();
+      if (!s) return { ok: false, error: '스캐너 세션을 켜지 못했습니다.' };
+      const r = await sessionCommand(s, { cmd: 'warm', deviceId }, {
+        timeout: (ev) => (ev ? undefined : limits.warmTimeout),
+        isTerminal: (e) => e.type === 'warm' || e.type === 'error'
+      });
+      const ev = r.events.filter((e) => e.type === 'warm').pop();
+      if (ev && ev.ok === true) return { ok: true, cached: ev.cached === true };
+      if (ev) return { ok: false, error: wiaErrorMessage(ev.hresult, ev.message).message };
+      return { ok: false, error: r.timedOut ? '스캐너가 응답하지 않습니다.' : processFailure(r) };
+    }).catch((err) => ({ ok: false, error: String((err && err.message) || err) }));
+    warming.set(deviceId, p);
+    p.then(() => { if (warming.get(deviceId) === p) warming.delete(deviceId); });
+    return p;
+  }
+
   /* 장치 목록 → { ok, devices?, error? } */
+  function listResult(res) {
+    if (!res.ok) return { ok: false, error: wiaErrorMessage(res.hresult, res.message).message };
+    return { ok: true, devices: sanitizeDevices(res.devices) };
+  }
+
+  const LIST_TIMEOUT_ERROR = '스캐너 목록을 가져오는 데 너무 오래 걸립니다. 스캐너 전원과 연결을 확인해 주세요.';
+
+  async function listOneShot(exe) {
+    let dir = null;
+    try {
+      dir = await makeWorkDir();
+      const script = await writeScript(dir, 'list-devices.ps1', LIST_DEVICES_PS1);
+      const r = await run(exe, script, [], { timeout: (ev) => (ev ? undefined : limits.listTimeout) });
+      if (r.timedOut) return { ok: false, error: LIST_TIMEOUT_ERROR };
+      const res = r.events.filter((e) => typeof e.ok === 'boolean').pop();
+      if (!res) return { ok: false, error: processFailure(r) };
+      return listResult(res);
+    } finally {
+      await removeDir(dir);
+    }
+  }
+
   async function listDevices() {
     if (job) return { ok: false, error: '스캔하는 중에는 스캐너 목록을 새로 고칠 수 없습니다.' };
     const exe = o.powershell();
     if (!exe) return { ok: false, error: '스캐너 직접 연결은 Windows 에서만 쓸 수 있습니다.' };
     if (listing) return listing;
-    listing = (async () => {
-      let dir = null;
+    listing = enqueue(async () => {
       try {
-        dir = await makeWorkDir();
-        const script = await writeScript(dir, 'list-devices.ps1', LIST_DEVICES_PS1);
-        const r = await run(exe, script, [], { timeout: (ev) => (ev ? undefined : limits.listTimeout) });
-        if (r.timedOut) return { ok: false, error: '스캐너 목록을 가져오는 데 너무 오래 걸립니다. 스캐너 전원과 연결을 확인해 주세요.' };
-        const res = r.events.filter((e) => typeof e.ok === 'boolean').pop();
-        if (!res) return { ok: false, error: processFailure(r) };
-        if (!res.ok) return { ok: false, error: wiaErrorMessage(res.hresult, res.message).message };
-        return { ok: true, devices: sanitizeDevices(res.devices) };
+        const s = await getSession();
+        if (s) {
+          const r = await sessionCommand(s, { cmd: 'list' }, {
+            timeout: (ev) => (ev ? undefined : limits.listTimeout),
+            isTerminal: (e) => e.type === 'list' || e.type === 'error'
+          });
+          if (r.timedOut) return { ok: false, error: LIST_TIMEOUT_ERROR };
+          const res = r.events.filter((e) => e.type === 'list' && typeof e.ok === 'boolean').pop();
+          if (res) return listResult(res);
+          // 세션이 죽었거나 명령을 알아듣지 못함 → 한 번 실행 방식으로
+        }
+        return await listOneShot(exe);
       } catch (err) {
         return { ok: false, error: '스캐너 목록을 가져오지 못했습니다. ' + String((err && err.message) || err) };
       } finally {
-        await removeDir(dir);
         listing = null;
       }
-    })();
+    });
     return listing;
   }
 
@@ -310,7 +592,13 @@ function createScanner(o) {
     return { files, dropped };
   }
 
-  /* 스캔 → { ok, files?, error?, cancelled? } */
+  /* 스캔 → { ok, files?, error?, cancelled?, timing? }
+   * timing = { setupMs, scanMs, totalMs, waitMs, warm, session }
+   *   setupMs: 명령을 보낸(스크립트를 띄운) 때 → 'scanning' (장치 연결 · 설정. 다시 연결했다면 그것까지)
+   *   scanMs:  'scanning' → 마지막 'page' (스캔 · 전송 · 저장)
+   *   totalMs: scan() 호출 → 결과 (대기열 · 세션 시작 · 파일 읽기 포함)
+   *   waitMs:  scan() 호출 → 명령을 보낸 때 (앞 명령 · 세션 시작을 기다린 시간)
+   *   warm:    장치 연결을 다시 쓰지 않고 이어 썼는지 · session: 세션으로 스캔했는지 */
   async function scan(opts, onProgress) {
     const v = validateScanOptions(opts);
     if (!v.ok) return { ok: false, error: v.error };
@@ -318,47 +606,85 @@ function createScanner(o) {
     if (listing) return { ok: false, error: '스캐너 목록을 가져오는 중입니다. 잠시 뒤에 다시 시도해 주세요.' };
     const exe = o.powershell();
     if (!exe) return { ok: false, error: '스캐너 직접 연결은 Windows 에서만 쓸 수 있습니다.' };
-    const { deviceId, source, dpi, color } = v.value;
+    const { deviceId, source, dpi, color, area } = v.value;
     const feeder = source === 'feeder';
     const progress = (p) => { if (onProgress) { try { onProgress(p); } catch (_) { /* 무시 */ } } };
-    const thisJob = { kill: null, cancelled: false };
+    const thisJob = { kill: null, cancelled: false, mode: null, deviceId };
     job = thisJob;
+    lastDevice = deviceId;
     const when = new Date();
+    const t0 = Date.now();
+    const tm = { sentAt: null, scanning: null, lastPage: null, warm: false, session: false };
+    const span = (a, b) => (a !== null && b !== null && b >= a ? b - a : null);
+    const withTiming = (res) => Object.assign(res, {
+      timing: {
+        setupMs: span(tm.sentAt, tm.scanning), scanMs: span(tm.scanning, tm.lastPage), totalMs: Date.now() - t0,
+        waitMs: span(t0, tm.sentAt), warm: tm.warm, session: tm.session
+      }
+    });
     let dir = null;
     try {
       dir = await makeWorkDir();
       const outDir = path.join(dir, 'out');
       await fsp.mkdir(outDir);
-      const script = await writeScript(dir, 'scan.ps1', SCAN_PS1);
-      const jobFile = path.join(dir, 'job.json');
-      await fsp.writeFile(jobFile, JSON.stringify({ deviceId, source, dpi, color, outDir, maxPages: feeder ? MAX_PAGES : 1 }), 'utf8');
-      if (thisJob.cancelled) return { ok: false, cancelled: true, error: CANCELLED_MESSAGE };
-
-      const start = Date.now();
+      // 급지대는 장마다 길이가 다르니 범위를 줄이지 않는다 (줄이면 장 아래쪽이 잘린다)
+      const work = { deviceId, source, dpi, color, area: feeder ? 'full' : area, outDir, maxPages: feeder ? MAX_PAGES : 1 };
       const pages = [];
-      const timeout = (ev, deadline) => {
+      let started = false;
+      const makeTimeout = (start) => (ev, deadline) => {
         if (!ev) return feeder ? limits.feederTimeout : limits.flatbedTimeout;
         if (!feeder || ev.type !== 'page') return undefined;
         const now = Date.now();
         const next = Math.min(start + limits.feederHardCap, Math.max(deadline, now + limits.feederPerPage));
         return next - now;
       };
-      progress({ state: 'scanning' });
-      const r = await run(exe, script, ['-JobFile', jobFile], {
-        timeout,
-        onSpawn: ({ kill }) => { thisJob.kill = kill; if (thisJob.cancelled) kill(); },
-        onEvent: (ev) => {
-          // 스캐너 연결 · 설정이 끝나 실제 스캔을 시작하는 순간(화면에서 '준비' 시간 계산용)
-          if (ev.type === 'scanning') progress({ state: 'ready' });
-          if (ev.type === 'page' && Number.isInteger(ev.page) && ev.page > 0 && typeof ev.file === 'string') {
-            pages.push(ev);
-            progress({ state: 'page', page: pages.length });
-          }
+      const onEvent = (ev) => {
+        // 스캐너 연결 · 설정이 끝나 실제 스캔을 시작하는 순간(화면에서 '준비' 시간 계산용)
+        if (ev.type === 'scanning') {
+          if (!started) progress({ state: 'ready' });
+          started = true;
+          if (!pages.length) { tm.scanning = Date.now(); tm.warm = ev.warm === true; }
         }
+        if (ev.type === 'page' && Number.isInteger(ev.page) && ev.page > 0 && typeof ev.file === 'string') {
+          pages.push(ev);
+          tm.lastPage = Date.now();
+          progress({ state: 'page', page: pages.length });
+        }
+      };
+      progress({ state: 'scanning' });
+
+      const r = await enqueue(async () => {
+        if (thisJob.cancelled) return null;
+        const s = await getSession();
+        if (thisJob.cancelled) return null;
+        if (s) {
+          thisJob.mode = 'session';
+          tm.session = true;
+          const sr = await sessionCommand(s, Object.assign({ cmd: 'scan' }, work), {
+            timeout: makeTimeout(Date.now()), onEvent,
+            isTerminal: (e) => e.type === 'done' || e.type === 'error'
+          });
+          tm.sentAt = sr.sentAt;
+          if (!sr.died || sr.timedOut || thisJob.cancelled || started) return sr;
+          // 세션이 스캔을 시작하기 전에 죽었다 → 한 번 실행 방식으로 (세션은 다음에 쓸 때 다시 켠다)
+          tm.session = false; tm.scanning = null; tm.warm = false;
+        }
+        if (thisJob.cancelled) return null;
+        thisJob.mode = 'oneshot';
+        const script = await writeScript(dir, 'scan.ps1', SCAN_PS1);
+        const jobFile = path.join(dir, 'job.json');
+        await fsp.writeFile(jobFile, JSON.stringify(work), 'utf8');
+        if (thisJob.cancelled) return null;
+        tm.sentAt = Date.now();
+        return run(exe, script, ['-JobFile', jobFile], {
+          timeout: makeTimeout(tm.sentAt), onEvent,
+          onSpawn: ({ kill }) => { thisJob.kill = kill; if (thisJob.cancelled) kill(); }
+        });
       });
+      if (!r) return withTiming({ ok: false, cancelled: true, error: CANCELLED_MESSAGE });
 
       const { files, dropped } = await readPages(outDir, pages, when);
-      const withFiles = (res) => (files.length ? Object.assign(res, { files }) : res);
+      const withFiles = (res) => withTiming(files.length ? Object.assign(res, { files }) : res);
 
       if (thisJob.cancelled) return withFiles({ ok: false, cancelled: true, error: CANCELLED_MESSAGE });
       if (r.timedOut) {
@@ -372,31 +698,54 @@ function createScanner(o) {
         return withFiles(res);
       }
       const done = r.events.some((e) => e.type === 'done');
-      if (!done && !files.length) return { ok: false, error: processFailure(r) };
+      if (!done && !files.length) return withTiming({ ok: false, error: processFailure(r) });
       if (!files.length) {
-        return { ok: false, error: dropped ? '스캔한 이미지가 너무 커서 가져오지 못했습니다. 해상도를 낮춰 주세요.' : '스캔한 이미지가 없습니다.' };
+        return withTiming({ ok: false, error: dropped ? '스캔한 이미지가 너무 커서 가져오지 못했습니다. 해상도를 낮춰 주세요.' : '스캔한 이미지가 없습니다.' });
       }
       const res = { ok: true, files };
       if (dropped) res.error = '스캔한 이미지가 너무 커서 ' + files.length + '장만 가져왔습니다. 해상도를 낮춰 나눠 스캔해 주세요.';
-      return res;
+      return withTiming(res);
     } catch (e) {
-      return { ok: false, error: '스캔하지 못했습니다. ' + String((e && e.message) || e) };
+      return withTiming({ ok: false, error: '스캔하지 못했습니다. ' + String((e && e.message) || e) });
     } finally {
       if (job === thisJob) job = null;
       await removeDir(dir);
     }
   }
 
+  // 스캔 취소: 한 번 실행 중이면 그 프로세스를, 세션으로 스캔 중이거나 대기열에서 기다리는 중이면 세션을 죽인다.
   function cancel() {
     if (!job) return;
     job.cancelled = true;
     if (job.kill) job.kill();
+    if (job.mode !== 'oneshot' && sess) {
+      killSession(sess);
+      scheduleRewarm();
+    }
   }
 
-  return { listDevices, scan, cancel, busy: () => !!job };
+  /* 앱을 끌 때: 진행 중인 스캔을 멈추고 세션에 quit 을 보낸다 (안 끝나면 강제로). → Promise (세션이 끝나면) */
+  function shutdown() {
+    closed = true;
+    clearTimeout(rewarmTimer);
+    clearTimeout(idleTimer);
+    if (job) { job.cancelled = true; if (job.kill) job.kill(); }
+    return quitSession(sess);
+  }
+
+  function sessionInfo() {
+    return {
+      running: !!sess && sess.state === 'ready',
+      pid: sess && sess.child ? sess.child.pid : null,
+      started: sessionsStarted,
+      failures: sessFailures
+    };
+  }
+
+  return { listDevices, scan, cancel, warm, prewarm, shutdown, busy: () => !!job, sessionInfo };
 }
 
 module.exports = {
-  createScanner, validateScanOptions, sanitizeScanSettings, sanitizeDevices, wiaErrorMessage, parseHResult,
-  createLineParser, stamp, SOURCES, DPIS, COLORS, MAX_PAGES, CANCELLED_MESSAGE
+  createScanner, validateScanOptions, sanitizeScanSettings, sanitizeDevices, wiaErrorMessage, parseHResult, isDeviceId,
+  createLineParser, encodeCommand, stamp, SOURCES, DPIS, COLORS, AREAS, MAX_PAGES, CANCELLED_MESSAGE
 };
