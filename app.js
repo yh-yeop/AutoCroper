@@ -558,10 +558,12 @@
       var edgeT = Math.max(5, med * 2.5);
       // 종이 바로 앞 몇 줄 안에 경계선(주변보다 확실히 진한 줄)이 있어야 한다
       for (var j = inner.length - 1; j >= Math.max(0, inner.length - 4); j--) {
-        if (inner[j] >= edgeT) return j + 1; // 경계선까지 포함
+        // 경계선까지 포함. 다만 몇 px짜리(옅은 경계 · JPEG 울림)는 하늘이 아니므로 무시(다듬기가 처리)
+        if (inner[j] >= edgeT) return (j + 1 >= minExt) ? j + 1 : 0;
       }
       return 0;
     }
+    var minExt = Math.max(8, Math.round(Math.min(W, H) * 0.01));
     for (var round = 0; round < 2; round++) {
       var k;
       k = probe(y0, -1, Math.min(limY, y0), function (yy) { return yy < 0 ? null : rowMean(yy, x0, x1); });
@@ -1368,9 +1370,16 @@
       // 다만 틈 양쪽이 서로 무관하고(상관 < 0.25) 밝기가 크게 다르면(차 ≥ 40, 양쪽 흔들림의 2배 이상)
       // 끝을 맞춰 나란히 놓은 사진 두 장으로 본다(스캐너 모서리에 맞춰 붙인 같은 크기 사진).
       if (thin && tight) {
+        // 끝을 맞춰 나란히 놓은 같은 크기 사진(앨범 사진을 줄 맞춰 스캔하는 흔한 경우): 마주 보는 두 변이
+        // 모두 곧고 틈 양쪽 내용이 뚜렷이 이어지지 않으면(상관 < 0.6) 두 장으로 본다. 내용이 틈을 건너 이어지면
+        // (상관 ≥ 0.6, 사진 속 흰 선은 0.84~0.99) 합친다. 잘못 나뉘면 '한 장으로 되돌리기'로 쉽게 고칠 수 있지만,
+        // 잘못 합쳐지면 사진이 사라진 것처럼 보이므로 나누는 쪽을 택한다.
+        var straight = splitResidual(p1) <= 1 && splitResidual(p2) <= 1;
         var dm2 = Math.abs(st.ma - st.mb);
-        if (!(st.corr < 0.25 && dm2 >= 40 && dm2 >= 2 * Math.max(st.sa, st.sb))) return true;
-        continue;
+        var va = f.v1 - f.v0, vb = s.v1 - s.v0, sameSize = Math.abs(va - vb) <= 0.08 * Math.max(va, vb);
+        if (straight && (st.corr < 0.3 || (st.corr < 0.6 && sameSize))) continue; // 0.3~0.6이면 크기가 같은 두 장일 때만
+        if (st.corr < 0.25 && dm2 >= 40 && dm2 >= 2 * Math.max(st.sa, st.sb)) continue;
+        return true;
       }
       if (st.corr >= 0.45 || (st.sa < 6 && st.sb < 6 && Math.abs(st.ma - st.mb) < 8)) return true;
     }
@@ -2241,11 +2250,53 @@
     if (typeof findPhotoRegions !== 'function' || typeof extractRegion !== 'function') return false;
     var res;
     try { res = findPhotoRegions(it.base.analysis, opts.threshold, {}); } catch (_) { return false; }
+    if (res && res.regions && res.regions.length >= 2) res = addMissedRegions(it.base.analysis, res);
     if (!res || !res.regions || res.regions.length < 2) return false;
     splitInto({ name: it.name, file: it.file, bitmap: it.base.bitmap, analysis: it.base.analysis }, res, it.node, it);
     detachItem(it, false); // 원본 비트맵은 그룹이 가진다
     setStatus(it.name + ': 사진 ' + res.regions.length + '장을 찾아 나눴습니다.');
     return true;
+  }
+
+  /* 빠진 사진 되살리기: 나눈 영역 밖에 사진만 한 덩어리의 내용이 남아 있으면(배경으로 오인돼 사라지는 경우)
+   * 그 덩어리를 영역으로 더한다. 성긴 글씨 · 먼지는 덩어리 채움 비율이 낮아 더하지 않는다. */
+  function addMissedRegions(a, res) {
+    if (!res || !res.regions || res.regions.length < 1 || !a.dmap) return res;
+    var W = a.w, H = a.h, dm = a.dmap, c = Math.max(4, Math.round(Math.min(W, H) / 250));
+    var gw = Math.ceil(W / c), gh = Math.ceil(H / c), cell = new Uint8Array(gw * gh), x, y, i;
+    var boxes = res.regions.map(function (r) { var m = 2 * c; return [r.x0 - m, r.y0 - m, r.x1 + m, r.y1 + m]; });
+    var T = Math.max(12, Math.min(40, Math.round(opts.threshold * 0.5)));
+    for (y = 0; y < H; y += 2) {
+      var row = y * W, gy = (y / c) | 0;
+      for (x = 0; x < W; x += 2) {
+        if (dm[row + x] <= T) continue;
+        var inside = false;
+        for (i = 0; i < boxes.length; i++) { var b = boxes[i]; if (x >= b[0] && x <= b[2] && y >= b[1] && y <= b[3]) { inside = true; break; } }
+        if (!inside) cell[gy * gw + ((x / c) | 0)]++;
+      }
+    }
+    var need = Math.max(1, Math.round(c * c / 4 * 0.3)); // 칸 표본의 30% 이상이 내용
+    var seen = new Uint8Array(gw * gh), added = [], minArea = 0.015 * gw * gh, stack = [];
+    for (i = 0; i < gw * gh; i++) {
+      if (seen[i] || cell[i] < need) continue;
+      var n = 0, x0 = gw, y0 = gh, x1 = -1, y1 = -1; stack.push(i); seen[i] = 1;
+      while (stack.length) {
+        var k = stack.pop(), kx = k % gw, ky = (k / gw) | 0; n++;
+        if (kx < x0) x0 = kx; if (kx > x1) x1 = kx; if (ky < y0) y0 = ky; if (ky > y1) y1 = ky;
+        for (var dy = -2; dy <= 2; dy++) for (var dx = -2; dx <= 2; dx++) { // 2칸까지 떨어진 것도 한 덩어리
+          var nx = kx + dx, ny = ky + dy; if (nx < 0 || ny < 0 || nx >= gw || ny >= gh) continue;
+          var q = ny * gw + nx; if (!seen[q] && cell[q] >= need) { seen[q] = 1; stack.push(q); }
+        }
+      }
+      var bw = x1 - x0 + 1, bh = y1 - y0 + 1;
+      if (n >= minArea && n / (bw * bh) >= 0.45 && Math.min(bw, bh) >= 0.05 * Math.min(gw, gh)) {
+        added.push({ x0: Math.max(0, x0 * c), y0: Math.max(0, y0 * c), x1: Math.min(W - 1, (x1 + 1) * c - 1), y1: Math.min(H - 1, (y1 + 1) * c - 1), label: -1 - added.length, recovered: true });
+      }
+    }
+    if (!added.length) return res;
+    var regs = res.regions.concat(added);
+    if (typeof orderRegions === 'function') { try { regs = orderRegions(regs) || regs; } catch (_) {} }
+    return Object.assign({}, res, { regions: regs, recovered: added.length });
   }
 
   // 원본(src: name · file · bitmap · analysis)을 res의 영역들로 나눠 카드를 만든다
@@ -2276,6 +2327,7 @@
     for (var k = 0; k < SPLIT_LADDER.length; k++) {
       var step = SPLIT_LADDER[k], res;
       try { res = findPhotoRegions(analysis, Math.max(5, Math.min(120, opts.threshold + step.t)), step.o); } catch (_) { continue; }
+      if (res && res.regions && res.regions.length >= 1) res = addMissedRegions(analysis, res);
       if (res && res.regions && res.regions.length >= atLeast) return res;
     }
     return null;

@@ -427,6 +427,31 @@
       return { pass: n[0] <= 1 && n[1] <= 1 && n[2] <= 1, detail: '사진 1장 → ' + n[0] + ' · 문서 → ' + n[1] + ' · 빈 페이지 → ' + n[2] + ' (모두 1 이하면 나누지 않음)' };
     });
 
+    test('여러 장 분리: 같은 크기 사진 3장을 줄 맞춰(틈 15px) 세로 · 가로로', async function () {
+      var v = canvas(2480, 3508, function (ctx) { for (var i = 0; i < 3; i++) drawPhoto(ctx, 300, 120 + i * 1015, 1800, 1000, 70 + i); });
+      var h = canvas(2480, 3508, function (ctx) { for (var i = 0; i < 3; i++) drawPhoto(ctx, 150 + i * 735, 400, 720, 1000, 80 + i); });
+      var rv = await splitAll(await jpegRoundTrip(v, 0.9)), rh = await splitAll(await jpegRoundTrip(h, 0.9));
+      var ok = rv.res.regions.length === 3 && rh.res.regions.length === 3;
+      [rv, rh].forEach(function (r) { r.outs.forEach(function (o) { if (edgePaperRatio(o.out, 10) > 0.005) ok = false; }); });
+      return { pass: ok, detail: '세로 3장 → ' + rv.res.regions.length + '장 (' + rv.outs.map(function (o) { return o.out.width + '×' + o.out.height; }).join(' · ') + ') / 가로 3장 → ' + rh.res.regions.length + '장 (' + rh.outs.map(function (o) { return o.out.width + '×' + o.out.height; }).join(' · ') + ')' };
+    });
+
+    test('하얗게 날아간 하늘 되살리기 (사진 경계선까지)', async function () {
+      // 종이 d≈0, 사진 위쪽 45%는 하늘(d≈1~2, 약한 파랑), 사진 테두리 1px 경계선(d≈14)
+      var r0 = rng(9);
+      var c = canvas(1654, 2338, function (ctx, w, h) {
+        var x0 = 200, y0 = 150, pw = 1100, ph = 800, sky = Math.round(ph * 0.45);
+        drawPhoto(ctx, x0, y0 + sky, pw, ph - sky, 33);
+        var im = ctx.getImageData(x0, y0, pw, sky), d = im.data;
+        for (var i = 0; i < d.length; i += 4) { d[i] = 253 + Math.floor(r0() * 2) - 1; d[i + 1] = 255; d[i + 2] = 255; }
+        ctx.putImageData(im, x0, y0);
+        ctx.strokeStyle = 'rgb(241,241,241)'; ctx.lineWidth = 1; ctx.strokeRect(x0 + 0.5, y0 + 0.5, pw - 1, ph - 1);
+      });
+      var r = await crop(await jpegRoundTrip(c, 0.92));
+      var R = r.plan.rect, ok = Math.abs(R.x - 200) <= 3 && Math.abs(R.y - 150) <= 3 && Math.abs(R.w - 1100) <= 6 && Math.abs(R.h - 800) <= 6;
+      return { pass: ok && r.plan.extended, detail: '결과 (' + R.x + ',' + R.y + ') ' + R.w + '×' + R.h + ' (정답 (200,150) 1100×800), 하늘 되살림 ' + (r.plan.extended ? '적용' : '안 됨'), thumbs: [thumb(r.out)] };
+    });
+
     function sameArray(a, b) {
       if (!a || !b || a.length !== b.length) return false;
       for (var i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
