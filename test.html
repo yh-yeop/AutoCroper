@@ -1,0 +1,373 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>흰 여백 자르기 · 테스트</title>
+  <link rel="stylesheet" href="style.css">
+  <style>
+    .wrap { padding-top: 20px; padding-bottom: 32px; }
+    #summary { font-weight: 600; margin: 8px 0 16px; }
+    #summary.ok { color: #1f8a4c; }
+    #summary.bad { color: #d23b3b; }
+    table { width: 100%; border-collapse: collapse; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+    th, td { text-align: left; padding: 8px 10px; border-top: 1px solid var(--border); vertical-align: top; font-size: 0.88rem; }
+    th { border-top: 0; color: var(--muted); font-weight: 600; }
+    td.res { font-weight: 700; white-space: nowrap; }
+    td.res.pass { color: #1f8a4c; }
+    td.res.fail { color: #d23b3b; }
+    td.detail { color: var(--muted); font-variant-numeric: tabular-nums; }
+    .thumbs { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+    .thumbs canvas { max-width: 140px; max-height: 140px; background: var(--frame); box-shadow: 0 0 0 1px var(--border); }
+    .own { margin-top: 24px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; }
+    .own .thumbs canvas { max-width: 320px; max-height: 320px; }
+    @media (max-width: 600px) { th:nth-child(3), td.detail { display: none; } }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <h1>알고리즘 테스트</h1>
+    <p class="lead">흰 배경 테스트 이미지를 Canvas로 만들어 실제 <code>app.js</code>의 크롭 함수에 넣고 결과를 확인합니다. <a href="index.html">← 도구로 돌아가기</a></p>
+    <p id="summary">실행 중…</p>
+    <table>
+      <thead><tr><th>테스트</th><th>결과</th><th>내용</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+
+    <section class="own">
+      <h2 style="margin:0 0 6px;font-size:1.05rem">내 이미지로 확인</h2>
+      <p class="hint">이미지를 고르면 기본 옵션으로 자른 결과와, 결과 네 변에 남은 종이색 픽셀 비율을 보여 줍니다(0%면 흰 틈 없음). 서버로 전송되지 않습니다.</p>
+      <input id="own-file" type="file" accept="image/*">
+      <p id="own-out" class="hint"></p>
+      <div id="own-thumbs" class="thumbs"></div>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+  <script>
+  (function () {
+    'use strict';
+    var WC = window.WhiteCrop;
+    var D = WC.DEFAULTS;
+    var rowsEl = document.getElementById('rows');
+    var results = [];
+
+    /* ── 도우미 ── */
+    function canvas(w, h, draw) {
+      var c = document.createElement('canvas');
+      c.width = w; c.height = h;
+      var ctx = c.getContext('2d');
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(0, 0, w, h);
+      if (draw) draw(ctx, w, h);
+      return c;
+    }
+    function bitmapOf(c) { return createImageBitmap(c); }
+    function jpegRoundTrip(c, q) {
+      return new Promise(function (res) { c.toBlob(res, 'image/jpeg', q); }).then(function (b) { return createImageBitmap(b); });
+    }
+    // 의사 난수 (매번 같은 이미지)
+    function rng(seed) {
+      var s = seed >>> 0;
+      return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+    }
+    // 사진처럼 꽉 찬 내용: 그라디언트 + 색 얼룩 (일부는 밝은 영역 포함)
+    function drawPhoto(ctx, x, y, w, h, seed) {
+      var r = rng(seed || 7);
+      var g = ctx.createLinearGradient(x, y, x + w, y + h);
+      g.addColorStop(0, '#7f9cc4'); g.addColorStop(0.5, '#6b8f4e'); g.addColorStop(1, '#b8742f');
+      ctx.fillStyle = g;
+      ctx.fillRect(x, y, w, h);
+      ctx.save();
+      ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip();
+      for (var i = 0; i < 160; i++) {
+        var rad = 4 + r() * Math.min(w, h) * 0.08;
+        ctx.fillStyle = 'hsl(' + Math.floor(r() * 360) + ',' + Math.floor(30 + r() * 50) + '%,' + Math.floor(25 + r() * 50) + '%)';
+        ctx.beginPath(); ctx.arc(x + r() * w, y + r() * h, rad, 0, Math.PI * 2); ctx.fill();
+      }
+      ctx.restore();
+    }
+    function sameBox(a, b) { return a && b && a.x0 === b.x0 && a.y0 === b.y0 && a.x1 === b.x1 && a.y1 === b.y1; }
+    function boxStr(b) { return b ? '(' + b.x0 + ',' + b.y0 + ')–(' + b.x1 + ',' + b.y1 + ')' : '없음'; }
+    function near(a, b, tol) {
+      return a && b && Math.abs(a.x0 - b.x0) <= tol && Math.abs(a.y0 - b.y0) <= tol && Math.abs(a.x1 - b.x1) <= tol && Math.abs(a.y1 - b.y1) <= tol;
+    }
+    function opts(o) { return Object.assign({}, D, o || {}); }
+    function pixel(c, x, y) { return c.getContext('2d').getImageData(x, y, 1, 1).data; }
+    // 결과 네 변에서 종이색(흰색과 차이 ≤ limit) 픽셀 비율
+    function edgePaperRatio(c, limit) {
+      var w = c.width, h = c.height, ctx = c.getContext('2d');
+      var lines = [ctx.getImageData(0, 0, w, 1), ctx.getImageData(0, h - 1, w, 1), ctx.getImageData(0, 0, 1, h), ctx.getImageData(w - 1, 0, 1, h)];
+      var n = 0, p = 0;
+      lines.forEach(function (im) {
+        for (var i = 0; i < im.data.length; i += 4) {
+          n++;
+          if (255 - Math.min(im.data[i], im.data[i + 1], im.data[i + 2]) <= limit) p++;
+        }
+      });
+      return p / n;
+    }
+    function previewWithBox(src, plan) {
+      var s = Math.min(1, 280 / Math.max(src.width, src.height));
+      var c = canvas(Math.round(src.width * s), Math.round(src.height * s), function (ctx, w, h) {
+        ctx.drawImage(src, 0, 0, w, h);
+        if (plan && !plan.empty) {
+          ctx.setLineDash([4, 3]); ctx.strokeStyle = '#e5484d'; ctx.lineWidth = 1.5;
+          var r = plan.rect;
+          ctx.strokeRect(r.x * s, r.y * s, r.w * s, r.h * s);
+        }
+      });
+      return c;
+    }
+    function thumb(c) {
+      var s = Math.min(1, 280 / Math.max(c.width, c.height));
+      return canvas(Math.max(1, Math.round(c.width * s)), Math.max(1, Math.round(c.height * s)), function (ctx, w, h) { ctx.drawImage(c, 0, 0, w, h); });
+    }
+
+    async function crop(src, o) {
+      var bmp = src instanceof ImageBitmap ? src : await bitmapOf(src);
+      var a = await WC.analyzeBitmap(bmp, o && o.forceMain ? { forceMain: true } : null);
+      var plan = WC.planCrop(a, opts(o));
+      var out = WC.renderOutput(bmp, (o && o.rotation) || 0, plan.rect);
+      return { a: a, plan: plan, out: out, bmp: bmp };
+    }
+
+    var tests = [];
+    function test(name, fn) { tests.push({ name: name, fn: fn }); }
+
+    /* ── 테스트 ── */
+    test('검은 사각형: 경계 상자 정확', async function () {
+      var c = canvas(800, 600, function (ctx) { ctx.fillStyle = '#000'; ctx.fillRect(100, 50, 200, 150); });
+      var r = await crop(c);
+      var want = { x0: 100, y0: 50, x1: 299, y1: 199 };
+      return { pass: sameBox(r.plan.box, want) && r.out.width === 200 && r.out.height === 150,
+        detail: '상자 ' + boxStr(r.plan.box) + ', 출력 ' + r.out.width + '×' + r.out.height, thumbs: [previewWithBox(c, r.plan), thumb(r.out)] };
+    });
+
+    test('먼지 점은 노이즈 필터로 무시', async function () {
+      var c = canvas(1000, 800, function (ctx) {
+        ctx.fillStyle = '#222'; ctx.fillRect(300, 250, 400, 300);
+        ctx.fillStyle = '#555';
+        [[20, 20], [960, 40], [50, 760], [930, 700], [500, 30], [15, 400]].forEach(function (p) { ctx.fillRect(p[0], p[1], 3, 3); });
+      });
+      var r = await crop(c, { noise: 5 });
+      var r0 = await crop(c, { noise: 0 });
+      var want = { x0: 300, y0: 250, x1: 699, y1: 549 };
+      return { pass: sameBox(r.plan.box, want) && r0.plan.box.x0 === 15 && r0.plan.box.y1 === 762,
+        detail: '필터 5: ' + boxStr(r.plan.box) + ' / 필터 끔: ' + boxStr(r0.plan.box), thumbs: [previewWithBox(c, r.plan), previewWithBox(c, r0.plan)] };
+    });
+
+    test('임계값: 연회색(차이 25)은 40에선 배경, 20에선 내용', async function () {
+      var c = canvas(400, 300, function (ctx) { ctx.fillStyle = 'rgb(230,230,230)'; ctx.fillRect(50, 60, 100, 80); });
+      var hi = await crop(c, { threshold: 40 });
+      var lo = await crop(c, { threshold: 20 });
+      return { pass: hi.plan.empty && sameBox(lo.plan.box, { x0: 50, y0: 60, x1: 149, y1: 139 }),
+        detail: '40: ' + (hi.plan.empty ? '내용 없음' : boxStr(hi.plan.box)) + ' / 20: ' + boxStr(lo.plan.box) };
+    });
+
+    test('완전히 흰 이미지: 원본 유지 + 경고 상태', async function () {
+      var c = canvas(300, 200);
+      var r = await crop(c);
+      return { pass: r.plan.empty && r.out.width === 300 && r.out.height === 200,
+        detail: 'empty=' + r.plan.empty + ', 출력 ' + r.out.width + '×' + r.out.height };
+    });
+
+    test('미색 배경 노이즈(245±8)는 배경으로 처리', async function () {
+      var r0 = rng(3);
+      var c = canvas(600, 500, function (ctx, w, h) {
+        var im = ctx.getImageData(0, 0, w, h), d = im.data;
+        for (var i = 0; i < d.length; i += 4) { var v = 245 + Math.round((r0() - 0.5) * 16); d[i] = d[i + 1] = d[i + 2] = v; }
+        ctx.putImageData(im, 0, 0);
+        ctx.fillStyle = '#333'; ctx.fillRect(120, 90, 300, 250);
+      });
+      var r = await crop(c, { trim: false });
+      return { pass: sameBox(r.plan.box, { x0: 120, y0: 90, x1: 419, y1: 339 }), detail: '상자 ' + boxStr(r.plan.box) };
+    });
+
+    test('색 내용: 연노랑(255,255,200)도 내용으로 인식', async function () {
+      var c = canvas(500, 400, function (ctx) { ctx.fillStyle = 'rgb(255,255,200)'; ctx.fillRect(40, 30, 120, 90); ctx.fillStyle = 'rgb(255,0,0)'; ctx.fillRect(300, 250, 50, 50); });
+      var r = await crop(c);
+      return { pass: sameBox(r.plan.box, { x0: 40, y0: 30, x1: 349, y1: 299 }), detail: '상자 ' + boxStr(r.plan.box) };
+    });
+
+    test('내용이 가장자리에 닿음', async function () {
+      var c = canvas(400, 300, function (ctx) { ctx.fillStyle = '#000'; ctx.fillRect(0, 0, 400, 10); ctx.fillRect(390, 0, 10, 300); });
+      var r = await crop(c);
+      return { pass: sameBox(r.plan.box, { x0: 0, y0: 0, x1: 399, y1: 9 }) || sameBox(r.plan.box, { x0: 0, y0: 0, x1: 399, y1: 299 }),
+        detail: '상자 ' + boxStr(r.plan.box) };
+    });
+
+    test('회전 90/180/270°: 크기와 방향', async function () {
+      // 내용 300×100, 왼쪽 위 모서리에 빨간 표식
+      var c = canvas(600, 400, function (ctx) {
+        ctx.fillStyle = '#123'; ctx.fillRect(100, 150, 300, 100);
+        ctx.fillStyle = 'rgb(255,0,0)'; ctx.fillRect(100, 150, 20, 20);
+      });
+      var expect = { 0: [300, 100, 'tl'], 90: [100, 300, 'tr'], 180: [300, 100, 'br'], 270: [100, 300, 'bl'] };
+      var ok = true, notes = [], thumbs = [];
+      for (var rot of [0, 90, 180, 270]) {
+        var r = await crop(c, { rotation: rot });
+        var w = r.out.width, h = r.out.height, e = expect[rot];
+        var pos = { tl: [5, 5], tr: [w - 6, 5], br: [w - 6, h - 6], bl: [5, h - 6] }[e[2]];
+        var px = pixel(r.out, pos[0], pos[1]);
+        var red = px[0] > 200 && px[1] < 60 && px[2] < 60;
+        var good = w === e[0] && h === e[1] && red;
+        ok = ok && good;
+        notes.push(rot + '°: ' + w + '×' + h + (red ? '' : ' 표식 위치 틀림'));
+        thumbs.push(thumb(r.out));
+      }
+      return { pass: ok, detail: notes.join(' · '), thumbs: thumbs };
+    });
+
+    test('추가 여백 10px: 크기 +20, 테두리는 흰색', async function () {
+      var c = canvas(400, 300, function (ctx) { ctx.fillStyle = '#000'; ctx.fillRect(5, 100, 200, 100); });
+      var r = await crop(c, { padding: 10 });
+      var p1 = pixel(r.out, 0, 0), p2 = pixel(r.out, r.out.width - 1, r.out.height - 1), p3 = pixel(r.out, 10, 10);
+      var white = function (p) { return p[0] === 255 && p[1] === 255 && p[2] === 255; };
+      return { pass: r.out.width === 220 && r.out.height === 120 && white(p1) && white(p2) && !white(p3),
+        detail: '출력 ' + r.out.width + '×' + r.out.height + ' (이미지 밖으로 나간 여백도 흰색)' };
+    });
+
+    test('JPEG 압축 후에도 ±2px', async function () {
+      var c = canvas(1200, 900, function (ctx) { drawPhoto(ctx, 210, 160, 600, 450, 11); });
+      var bmp = await jpegRoundTrip(c, 0.7);
+      var r = await crop(bmp, { trim: false });
+      var want = { x0: 210, y0: 160, x1: 809, y1: 609 };
+      return { pass: near(r.plan.box, want, 2), detail: '상자 ' + boxStr(r.plan.box) + ' (기대 ' + boxStr(want) + ')' };
+    });
+
+    test('살짝 기운 사진(1.5°): 결과 가장자리에 흰 틈 없음', async function () {
+      var c = canvas(1400, 1800, function (ctx) {
+        ctx.translate(500, 600); ctx.rotate(1.5 * Math.PI / 180);
+        drawPhoto(ctx, -380, -480, 760, 1000, 21);
+      });
+      var bmp = await jpegRoundTrip(c, 0.85);
+      var on = await crop(bmp, { trim: true });
+      var off = await crop(bmp, { trim: false });
+      var eOn = edgePaperRatio(on.out, 10), eOff = edgePaperRatio(off.out, 10);
+      return { pass: on.plan.refined && eOn === 0 && eOff > 0.05,
+        detail: '다듬기 켬: 종이색 ' + (eOn * 100).toFixed(2) + '% (' + on.out.width + '×' + on.out.height + ') / 끔: ' + (eOff * 100).toFixed(2) + '% (' + off.out.width + '×' + off.out.height + ')',
+        thumbs: [previewWithBox(c, on.plan), thumb(on.out), thumb(off.out)] };
+    });
+
+    test('옅은 경계선(사진·종이 섞인 1px)과 3px 쐐기 제거', async function () {
+      // 사용자 예시와 같은 형태: 오른쪽 끝 1열이 반쯤 옅고, 아래쪽에 0→3px 흰 쐐기
+      var c = canvas(1000, 1300, function (ctx) {
+        drawPhoto(ctx, 15, 15, 781, 1177, 5);
+        var im = ctx.getImageData(795, 15, 1, 1177), d = im.data;
+        for (var i = 0; i < d.length; i += 4) { d[i] = (d[i] + 255) >> 1; d[i + 1] = (d[i + 1] + 255) >> 1; d[i + 2] = (d[i + 2] + 255) >> 1; }
+        ctx.putImageData(im, 795, 15);
+        ctx.fillStyle = '#fff';
+        ctx.beginPath(); ctx.moveTo(15, 1192); ctx.lineTo(15, 1189); ctx.lineTo(680, 1192); ctx.closePath(); ctx.fill();
+      });
+      var on = await crop(c, { trim: true });
+      var off = await crop(c, { trim: false });
+      var eOn = edgePaperRatio(on.out, 10);
+      var b = on.plan.box;
+      return { pass: eOn === 0 && b.x1 <= 794 && b.y1 <= 1188 && b.x0 === 15 && b.y0 === 15,
+        detail: '상자 ' + boxStr(off.plan.box) + ' → ' + boxStr(b) + ', 가장자리 종이색 ' + (eOn * 100).toFixed(2) + '%',
+        thumbs: [thumb(on.out)] };
+    });
+
+    test('문서처럼 성긴 내용엔 다듬기 미적용', async function () {
+      var c = canvas(1000, 1300, function (ctx) {
+        ctx.fillStyle = '#222'; ctx.font = '22px sans-serif';
+        for (var i = 0; i < 25; i++) ctx.fillText('흰 여백 자르기 테스트 문장입니다 — Lorem ipsum ' + i, 140, 200 + i * 36);
+      });
+      var r = await crop(c, { trim: true });
+      return { pass: !r.plan.refined && sameBox(r.plan.box, r.plan.rawBox), detail: '상자 ' + boxStr(r.plan.box) + ', 다듬기 ' + (r.plan.refined ? '적용(틀림)' : '건너뜀'),
+        thumbs: [previewWithBox(c, r.plan)] };
+    });
+
+    test('밝은 영역이 가장자리에 닿은 사진은 과하게 깎지 않음', async function () {
+      var c = canvas(1000, 1200, function (ctx) {
+        drawPhoto(ctx, 100, 100, 700, 900, 9);
+        ctx.fillStyle = 'rgb(205,215,225)'; // 흐린 하늘(차이 50) — 내용이지만 밝음
+        ctx.fillRect(100, 100, 700, 150);
+      });
+      var r = await crop(c, { trim: true });
+      var b = r.plan.box;
+      return { pass: b.x0 - 100 <= 2 && b.y0 - 100 <= 2 && 799 - b.x1 <= 2 && 999 - b.y1 <= 2, detail: '상자 ' + boxStr(b) + ' (원래 (100,100)–(799,999))' };
+    });
+
+    test('큰 이미지 4000×6000 처리 시간', async function () {
+      var c = canvas(4000, 6000, function (ctx) { drawPhoto(ctx, 300, 400, 3200, 4800, 2); });
+      var bmp = await bitmapOf(c);
+      c.width = c.height = 0;
+      var t0 = performance.now();
+      var a = await WC.analyzeBitmap(bmp);
+      var t1 = performance.now();
+      var plan = WC.planCrop(a, opts());
+      var t2 = performance.now();
+      bmp.close();
+      return { pass: sameBox(plan.box, { x0: 300, y0: 400, x1: 3499, y1: 5199 }) && (t1 - t0) < 15000,
+        detail: '분석 ' + Math.round(t1 - t0) + 'ms (' + (WC.usingWorker() ? 'Web Worker' : '메인 스레드') + '), 옵션 재계산 ' + (t2 - t1).toFixed(1) + 'ms' };
+    });
+
+    test('메인 스레드 대체 경로도 같은 결과', async function () {
+      var c = canvas(900, 700, function (ctx) { drawPhoto(ctx, 77, 55, 500, 400, 4); ctx.fillStyle = '#000'; ctx.fillRect(700, 600, 3, 3); });
+      var a = await crop(c);
+      var b = await crop(c, { forceMain: true });
+      return { pass: sameBox(a.plan.box, b.plan.box) && sameBox(a.plan.box, { x0: 77, y0: 55, x1: 576, y1: 454 }),
+        detail: (WC.usingWorker() ? '워커' : '메인') + ' ' + boxStr(a.plan.box) + ' / 메인 ' + boxStr(b.plan.box) };
+    });
+
+    test('파일 이름: 원본이름_crop.확장자', async function () {
+      var cases = [['scan 01.jpeg', 'jpeg', 'scan 01_crop.jpg'], ['a.b.png', 'png', 'a.b_crop.png'], ['noext', 'png', 'noext_crop.png'], ['사진.HEIC.jpg', 'jpeg', '사진.HEIC_crop.jpg']];
+      var bad = cases.filter(function (k) { return WC.outputName(k[0], k[1]) !== k[2]; });
+      return { pass: !bad.length, detail: cases.map(function (k) { return k[0] + ' → ' + WC.outputName(k[0], k[1]); }).join(' · ') };
+    });
+
+    /* ── 실행 ── */
+    function addRow(name, r) {
+      var tr = document.createElement('tr');
+      var td1 = document.createElement('td'); td1.textContent = name;
+      if (r.thumbs && r.thumbs.length) {
+        var t = document.createElement('div'); t.className = 'thumbs';
+        r.thumbs.forEach(function (c) { t.appendChild(c); });
+        td1.appendChild(t);
+      }
+      var td2 = document.createElement('td'); td2.className = 'res ' + (r.pass ? 'pass' : 'fail'); td2.textContent = r.pass ? '통과' : '실패';
+      var td3 = document.createElement('td'); td3.className = 'detail'; td3.textContent = r.detail || '';
+      tr.append(td1, td2, td3);
+      rowsEl.appendChild(tr);
+    }
+
+    (async function run() {
+      for (var t of tests) {
+        var r;
+        try { r = await t.fn(); } catch (err) { r = { pass: false, detail: '오류: ' + ((err && err.stack) || err) }; }
+        results.push({ name: t.name, pass: !!r.pass, detail: r.detail || '' });
+        addRow(t.name, r);
+      }
+      var passed = results.filter(function (r) { return r.pass; }).length;
+      var s = document.getElementById('summary');
+      s.textContent = passed + ' / ' + results.length + ' 통과';
+      s.className = passed === results.length ? 'ok' : 'bad';
+      window.__testResults = { passed: passed, total: results.length, results: results };
+      document.body.dataset.done = '1';
+    })();
+
+    /* ── 내 이미지로 확인 ── */
+    document.getElementById('own-file').addEventListener('change', async function (e) {
+      var f = e.target.files[0];
+      if (!f) return;
+      var out = document.getElementById('own-out'), th = document.getElementById('own-thumbs');
+      out.textContent = '분석 중…'; th.textContent = '';
+      try {
+        var bmp = await createImageBitmap(f);
+        var r = await crop(bmp);
+        var off = await crop(bmp, { trim: false });
+        out.textContent = '원본 ' + bmp.width + '×' + bmp.height +
+          ' → 경계 상자 ' + off.out.width + '×' + off.out.height + ' (가장자리 종이색 ' + (edgePaperRatio(off.out, 10) * 100).toFixed(2) + '%)' +
+          ' → 다듬기 ' + r.out.width + '×' + r.out.height + ' (가장자리 종이색 ' + (edgePaperRatio(r.out, 10) * 100).toFixed(2) + '%' + (r.plan.refined ? '' : ', 다듬기 건너뜀') + ')';
+        th.append(previewWithBox(bmp, r.plan), thumb(r.out));
+      } catch (err) {
+        out.textContent = '오류: ' + ((err && err.message) || err);
+      }
+    });
+  })();
+  </script>
+</body>
+</html>

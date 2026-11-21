@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="description" content="흰 배경 사진 · 스캔본의 흰 여백을 브라우저에서 자동으로 잘라 냅니다. 이미지는 서버로 전송되지 않습니다.">
+  <title>흰 여백 자르기</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='3' y='3' width='26' height='26' rx='5' fill='%23fff' stroke='%23999' stroke-width='2'/%3E%3Crect x='9' y='9' width='14' height='14' fill='%23e5484d'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="wrap">
+      <h1>흰 여백 자르기</h1>
+      <p class="lead">스캔본 · 흰 배경 사진의 흰 여백을 자동으로 잘라 냅니다.</p>
+      <p class="privacy">
+        <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M12 2a5 5 0 0 0-5 5v3H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2h-1V7a5 5 0 0 0-5-5Zm-3 8V7a3 3 0 1 1 6 0v3H9Z"/></svg>
+        이미지는 서버로 전송되지 않습니다. 모든 처리는 이 브라우저 안에서만 이뤄집니다.
+      </p>
+    </div>
+  </header>
+
+  <main class="wrap layout">
+
+    <section class="work">
+      <div id="dropzone" class="dropzone" role="button" tabindex="0" aria-describedby="drop-hint">
+        <input id="file-input" type="file" accept="image/*" multiple hidden>
+        <strong>이미지를 끌어다 놓거나 눌러서 선택</strong>
+        <span id="drop-hint">여러 장 가능 · <kbd>Ctrl</kbd>+<kbd>V</kbd>로 붙여넣기</span>
+      </div>
+
+      <div id="toolbar" class="toolbar" hidden>
+        <span id="count">0장</span>
+        <span class="grow"></span>
+        <button type="button" id="clear-btn" class="ghost">모두 지우기</button>
+        <button type="button" id="zip-btn" class="primary">전체 ZIP 다운로드</button>
+      </div>
+      <p id="status" class="status" role="status" aria-live="polite"></p>
+
+      <div id="list" class="list"></div>
+    </section>
+
+    <section class="options" aria-label="옵션">
+      <div class="opt">
+        <div class="opt-head"><label for="opt-threshold">흰색 임계값</label><output id="out-threshold" for="opt-threshold">40</output></div>
+        <input id="opt-threshold" type="range" min="5" max="120" step="1" value="40">
+        <p class="hint">흰색과 이만큼 넘게 다르면 내용으로 봅니다. 연한 내용이 잘리면 낮추세요.</p>
+      </div>
+      <div class="opt">
+        <div class="opt-head"><label for="opt-noise">노이즈 필터</label><output id="out-noise" for="opt-noise">5</output></div>
+        <input id="opt-noise" type="range" min="0" max="10" step="1" value="5">
+        <p class="hint">한 줄에 내용이 그 줄 길이의 이 비율보다 적으면 먼지로 보고 무시합니다.</p>
+      </div>
+      <div class="opt">
+        <label class="check"><input id="opt-trim" type="checkbox" checked> 사진 가장자리 흰 틈 제거</label>
+        <p class="hint">살짝 기운 사진의 모서리 흰 쐐기와 옅은 경계선까지 안쪽으로 다듬습니다. 문서처럼 성긴 내용에는 자동으로 적용되지 않습니다.</p>
+      </div>
+      <div class="opt">
+        <div class="opt-head"><label for="opt-padding">추가 여백</label><span class="unit">px</span></div>
+        <input id="opt-padding" type="number" min="0" max="2000" step="1" value="0" inputmode="numeric">
+      </div>
+      <div class="opt">
+        <div class="opt-head"><span id="rot-label">회전 (크롭 전에 적용)</span></div>
+        <div class="seg" role="group" aria-labelledby="rot-label">
+          <button type="button" data-rot="0" aria-pressed="true">0°</button>
+          <button type="button" data-rot="90" aria-pressed="false">90°</button>
+          <button type="button" data-rot="180" aria-pressed="false">180°</button>
+          <button type="button" data-rot="270" aria-pressed="false">270°</button>
+        </div>
+        <p class="hint">모든 이미지에 적용됩니다. 한 장만 돌리려면 카드의 회전 버튼을 쓰세요.</p>
+      </div>
+      <div class="opt">
+        <div class="opt-head"><span id="fmt-label">출력 포맷</span></div>
+        <div class="seg" role="group" aria-labelledby="fmt-label">
+          <button type="button" data-format="jpeg" aria-pressed="true">JPEG</button>
+          <button type="button" data-format="png" aria-pressed="false">PNG</button>
+        </div>
+      </div>
+      <div class="opt" id="quality-row">
+        <div class="opt-head"><label for="opt-quality">JPEG 품질</label><output id="out-quality" for="opt-quality">92</output></div>
+        <input id="opt-quality" type="range" min="50" max="100" step="1" value="92">
+      </div>
+      <button type="button" id="reset-btn" class="link">기본값으로</button>
+    </section>
+  </main>
+
+  <footer class="wrap foot">
+    <a href="test.html">알고리즘 테스트</a>
+  </footer>
+
+  <template id="card-tpl">
+    <article class="card">
+      <header class="card-head">
+        <span class="card-name"></span>
+        <button type="button" class="icon rm-btn" aria-label="이 이미지 빼기" title="빼기">×</button>
+      </header>
+      <div class="compare">
+        <figure>
+          <div class="frame"><canvas class="cv-orig"></canvas></div>
+          <figcaption class="cap-orig">원본</figcaption>
+        </figure>
+        <figure>
+          <div class="frame"><canvas class="cv-res"></canvas></div>
+          <figcaption class="cap-res">결과</figcaption>
+        </figure>
+      </div>
+      <p class="card-msg" hidden></p>
+      <div class="card-actions">
+        <div class="rotate" role="group" aria-label="이 이미지 회전">
+          <button type="button" class="icon rot-left" aria-label="왼쪽으로 90° 회전" title="왼쪽으로 회전">⟲</button>
+          <span class="rot-label">0°</span>
+          <button type="button" class="icon rot-right" aria-label="오른쪽으로 90° 회전" title="오른쪽으로 회전">⟳</button>
+        </div>
+        <button type="button" class="primary dl-btn" disabled>다운로드</button>
+      </div>
+    </article>
+  </template>
+
+  <script src="vendor/jszip.min.js" defer></script>
+  <script src="app.js" defer></script>
+</body>
+</html>
