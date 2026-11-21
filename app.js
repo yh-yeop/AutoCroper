@@ -516,19 +516,87 @@
   }
 
   // 크롭 계산 전체: 분석 결과 + 옵션 → { box(원본), rbox(회전), rect(출력), rotW, rotH, empty }
+  /* 하얗게 날아간 하늘 · 벽 되살리기
+   * 사진의 밝은 부분(하늘 d≈1~4)은 픽셀 하나로는 종이(d≈0~1)와 구별이 안 되지만, 줄 평균으로 보면
+   * 확실히 다르다(하늘 평균 1.5~2.5, 종이 0.1~0.3). 내용 상자의 각 변을 바깥으로 한 줄씩 보면서,
+   * 그 줄의 평균 진하기가 종이 평균보다 뚜렷이 높으면 사진의 일부로 보고 넓힌다.
+   * 사진을 자른 경계선(d≈10~20의 가는 선)을 지나 종이가 나오면 자연히 멈춘다. */
+  function extendFaint(a, box) {
+    var W = a.w, H = a.h, dm = a.dmap;
+    if (!dm || !box) return { box: box, extended: false };
+    var x0 = box.x0, y0 = box.y0, x1 = box.x1, y1 = box.y1;
+    // 종이 평균: 상자 바깥(여백)을 성기게 표본, 먼지(d>30)는 뺀다
+    var sum = 0, n = 0, x, y, v;
+    for (y = 0; y < H; y += 4) {
+      var row = y * W, inY = y >= y0 && y <= y1;
+      for (x = 0; x < W; x += 4) {
+        if (inY && x >= x0 && x <= x1) continue;
+        v = dm[row + x]; if (v <= 30) { sum += v; n++; }
+      }
+    }
+    if (n < 200) return { box: box, extended: false }; // 여백이 거의 없음
+    var paper = sum / n, thr = Math.max(1.0, paper * 3 + 0.8);
+    function rowMean(yy, xa, xb) { var s2 = 0, c = 0, b = yy * W; for (var xx = xa; xx <= xb; xx += 2) { var q = dm[b + xx]; s2 += q > 40 ? 40 : q; c++; } return s2 / c; }
+    function colMean(xx, ya, yb) { var s2 = 0, c = 0; for (var yy = ya; yy <= yb; yy += 2) { var q = dm[yy * W + xx]; s2 += q > 40 ? 40 : q; c++; } return s2 / c; }
+    var limX = Math.round(W * 0.45), limY = Math.round(H * 0.45), ext = false;
+    // 한 변을 바깥으로 훑어 '밝은 사진 띠 → 사진을 자른 경계선 → 종이'가 확인될 때만 그 경계선까지 넓힌다.
+    // 그림자 · 스캐너 가장자리처럼 경계선 없이 서서히 옅어지는 곳은 넓히지 않는다.
+    function probe(start, dir, lim, meanAt) {
+      var means = [], pos = start;
+      for (var i = 0; i < lim; i++) {
+        pos += dir;
+        if (pos < 0 || pos > lim + start + 1 && false) break;
+        var m = meanAt(pos);
+        if (m === null) break;
+        means.push(m);
+        if (m < thr) break; // 종이에 닿음
+      }
+      if (!means.length || means[means.length - 1] >= thr) return 0; // 종이에 못 닿음(끝까지 밝음) → 넓히지 않음
+      if (means.length < 3) return 0;
+      var inner = means.slice(0, means.length - 1);
+      var sorted = inner.slice().sort(function (p, q) { return p - q; }), med = sorted[sorted.length >> 1];
+      var edgeT = Math.max(5, med * 2.5);
+      // 종이 바로 앞 몇 줄 안에 경계선(주변보다 확실히 진한 줄)이 있어야 한다
+      for (var j = inner.length - 1; j >= Math.max(0, inner.length - 4); j--) {
+        if (inner[j] >= edgeT) return j + 1; // 경계선까지 포함
+      }
+      return 0;
+    }
+    for (var round = 0; round < 2; round++) {
+      var k;
+      k = probe(y0, -1, Math.min(limY, y0), function (yy) { return yy < 0 ? null : rowMean(yy, x0, x1); });
+      if (k) { y0 -= k; ext = true; }
+      k = probe(y1, 1, Math.min(limY, H - 1 - y1), function (yy) { return yy > H - 1 ? null : rowMean(yy, x0, x1); });
+      if (k) { y1 += k; ext = true; }
+      k = probe(x0, -1, Math.min(limX, x0), function (xx) { return xx < 0 ? null : colMean(xx, y0, y1); });
+      if (k) { x0 -= k; ext = true; }
+      k = probe(x1, 1, Math.min(limX, W - 1 - x1), function (xx) { return xx > W - 1 ? null : colMean(xx, y0, y1); });
+      if (k) { x1 += k; ext = true; }
+    }
+    return { box: { x0: x0, y0: y0, x1: x1, y1: y1 }, extended: ext, paper: paper };
+  }
+
   function planCrop(a, opts) {
     var rot = opts.rotation || 0;
     var rs = rotatedSize(a.w, a.h, rot);
     var rawBox = computeContentBox(a, opts.threshold, opts.noise);
-    var box = rawBox, refined = false;
+    var box = rawBox, refined = false, extended = false;
     if (rawBox && opts.trim) {
-      var rf = refineBox(a, rawBox, opts.threshold, !!opts.photo);
-      box = rf.box; refined = rf.applied;
+      var ef = extendFaint(a, rawBox);
+      extended = ef.extended;
+      if (extended) {
+        // 날아간 하늘을 되살렸다면, 다듬기는 하늘을 종이로 오인해 깎아 버리므로 하지 않는다
+        // (넓히기가 이미 사진을 자른 경계선에서 멈춘다)
+        box = ef.box;
+      } else {
+        var rf = refineBox(a, rawBox, opts.threshold, !!opts.photo);
+        box = rf.box; refined = rf.applied;
+      }
     }
     var empty = !box;
     var rbox = empty ? { x0: 0, y0: 0, x1: rs.w - 1, y1: rs.h - 1 } : rotateBox(box, a.w, a.h, rot);
     var rect = empty ? { x: 0, y: 0, w: rs.w, h: rs.h } : outputRect(rbox, opts.padding);
-    return { rawBox: rawBox, box: box, refined: refined, rbox: rbox, rect: rect, rotW: rs.w, rotH: rs.h, empty: empty };
+    return { rawBox: rawBox, box: box, refined: refined, extended: extended, rbox: rbox, rect: rect, rotW: rs.w, rotH: rs.h, empty: empty };
   }
 
   function makeCanvas(w, h) {
@@ -1556,6 +1624,7 @@
     analyzeBitmap: analyzeBitmap,
     computeContentBox: computeContentBox,
     refineBox: refineBox,
+    extendFaint: extendFaint,
     findPhotoRegions: findPhotoRegions,
     extractRegion: extractRegion,
     orderRegions: orderRegions,
