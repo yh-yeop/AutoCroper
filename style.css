@@ -67,19 +67,28 @@ a.install { text-decoration: none; color: inherit; display: inline-block; }
 }
 .privacy svg { flex: none; }
 
-/* 배치: 모바일은 위아래, 넓은 화면은 옵션 사이드바 */
-.layout { display: grid; gap: 16px; padding-top: 12px; padding-bottom: 24px; }
-@media (min-width: 900px) {
-  .layout { grid-template-columns: 280px minmax(0, 1fr); align-items: start; }
-  .options { grid-column: 1; grid-row: 1; position: sticky; top: 16px; }
-  .work { grid-column: 2; grid-row: 1; }
+/* 배치: 한 줄 흐름 — ① 사진 넣기 ② 저장할 곳 → 결과 → 고급 설정(접힘) */
+.main { display: grid; gap: 14px; padding-top: 12px; padding-bottom: 24px; }
+.steps { display: grid; gap: 14px; }
+@media (min-width: 900px) { .steps { grid-template-columns: 3fr 2fr; align-items: stretch; } }
+.step {
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 16px; display: flex; flex-direction: column; gap: 10px; min-width: 0;
 }
+.step-title { margin: 0; font-size: 1.05rem; display: flex; align-items: center; gap: 8px; }
+.step-no {
+  display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 50%;
+  background: var(--accent); color: var(--accent-text); font-size: 0.85rem; font-weight: 700; flex: none;
+}
+.input-actions { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); }
+.big { display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 14px 16px; font-size: 1.05rem; border-radius: 10px; }
+.input-actions.has-scan #open-btn { background: var(--surface); color: var(--text); border-color: var(--border); }
+.scan-summary { margin: 0; font-size: 0.85rem; color: var(--muted); }
+.scan-status { margin: 0; font-size: 0.88rem; color: var(--text); }
+.scan-status:empty { display: none; }
+#scan-btn.is-busy { background: var(--warn-text); }
 
 /* 옵션 */
-.options {
-  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
-  padding: 14px 16px; display: grid; gap: 14px;
-}
 .opt-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 4px; font-weight: 600; font-size: 0.92rem; }
 .opt-head output, .unit { font-weight: 500; color: var(--muted); font-variant-numeric: tabular-nums; }
 .hint { margin: 4px 0 0; font-size: 0.8rem; color: var(--muted); }
@@ -100,7 +109,7 @@ input[type="number"] {
 .link { justify-self: start; background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; font-size: 0.85rem; }
 
 /* 고급 설정(기본 접힘) */
-.advanced { border-top: 1px solid var(--border); margin: 0 -16px -14px; padding: 0 16px; }
+.advanced { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 0 16px; }
 .advanced > summary {
   list-style: none; cursor: pointer; display: flex; align-items: center; gap: 8px;
   padding: 12px 0; font-weight: 600; font-size: 0.92rem; user-select: none;
@@ -113,7 +122,15 @@ input[type="number"] {
 }
 .advanced[open] > summary::after { transform: rotate(-135deg) translateY(-2px); }
 .adv-changed { font-weight: 500; font-size: 0.8rem; color: var(--accent); }
-.adv-body { display: grid; gap: 14px; padding-bottom: 14px; }
+.adv-body { display: grid; gap: 18px; padding-bottom: 16px; }
+@media (min-width: 900px) { .adv-body { grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); align-items: start; } }
+.adv-group { display: grid; gap: 12px; align-content: start; border-top: 1px solid var(--border); padding-top: 12px; }
+.adv-group h3 { margin: 0; font-size: 0.95rem; }
+.field { display: grid; gap: 6px; font-size: 0.9rem; }
+.field > label, .field > span { font-weight: 600; }
+.field-row { display: flex; gap: 6px; }
+.field select { flex: 1; min-width: 0; padding: 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); }
+.field .seg button { padding: 8px 6px; font-size: 0.85rem; }
 
 /* 버튼 */
 .primary, .ghost, .icon {
@@ -128,7 +145,7 @@ button:focus-visible, .dropzone:focus-visible, input:focus-visible { outline: 2p
 /* 드롭 영역 */
 .dropzone {
   display: grid; gap: 4px; place-items: center; text-align: center;
-  padding: 28px 16px; border: 2px dashed var(--border); border-radius: var(--radius);
+  padding: 16px; border: 2px dashed var(--border); border-radius: var(--radius);
   background: var(--surface); cursor: pointer; transition: border-color .15s, background-color .15s;
 }
 .dropzone span { color: var(--muted); font-size: 0.88rem; }
@@ -182,18 +199,5 @@ figcaption { margin-top: 4px; font-size: 0.8rem; color: var(--muted); font-varia
 .update-bar .icon { border-color: transparent; color: inherit; }
 .foot .link { font-size: inherit; color: var(--muted); text-decoration: underline; }
 
-/* 스캔 (데스크톱 앱) */
-.scan-panel {
-  display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px;
-  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 12px;
-}
-.scan-btn { min-width: 96px; font-size: 1rem; }
-.scan-btn.is-busy { background: var(--warn-text); }
-.scan-panel select {
-  padding: 7px 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); max-width: 100%;
-}
-#scan-device { min-width: 160px; flex: 1 1 180px; }
-.seg-sm button { padding: 6px 12px; white-space: nowrap; flex: none; }
-.seg-sm button:disabled { opacity: 0.4; }
-.scan-status { flex-basis: 100%; font-size: 0.85rem; color: var(--muted); }
-.scan-status:empty { display: none; }
+.status:empty { display: none; }
+.toolbar[hidden] + .status:empty + .list:empty { display: none; }

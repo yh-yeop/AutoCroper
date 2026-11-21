@@ -1652,6 +1652,8 @@
 
   /* 파일 받기: 선택 · 드래그앤드롭 · 붙여넣기 */
   el.dropzone.addEventListener('click', function () { el.file.click(); });
+  var openBtn = document.getElementById('open-btn');
+  if (openBtn) openBtn.addEventListener('click', function () { el.file.click(); });
   el.dropzone.addEventListener('keydown', function (e) {
     if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); el.file.click(); }
   });
@@ -1740,14 +1742,14 @@
 
   function setSaveTarget(t) {
     saveTarget = t;
-    el.saveFolder.textContent = t ? t.label : '지정 안 함 · 다운로드 폴더로 받기';
+    el.saveFolder.textContent = t ? t.label : '아직 고르지 않았어요';
     el.saveFolder.classList.toggle('is-set', !!t);
     el.openFolder.hidden = !(t && t.kind === 'native');
     el.clearFolder.hidden = !t;
     el.autoSave.disabled = !t;
     el.saveAll.hidden = !t;
     el.zip.className = t ? 'ghost' : 'primary';
-    items.forEach(function (it) { it.ui.download.textContent = t ? '저장' : '다운로드'; });
+
     refreshToolbar();
   }
 
@@ -1755,7 +1757,8 @@
     if (!canPickFolder) {
       el.pickFolder.hidden = true;
       el.autoSave.closest('label').hidden = true;
-      el.saveHint.textContent = '이 브라우저는 폴더에 바로 저장하는 기능을 지원하지 않습니다. Edge · Chrome이나 Windows 설치 파일을 쓰면 폴더에 바로 저장할 수 있습니다.';
+      el.saveHint.textContent = "완성된 사진은 카드의 '저장'이나 '모두 내려받기'로 받으세요. (폴더에 바로 저장하려면 Edge · Chrome 또는 Windows 설치 파일을 쓰세요)";
+      el.saveFolder.textContent = '다운로드 폴더로 받아요';
       setSaveTarget(null);
       return;
     }
@@ -1764,22 +1767,27 @@
       native.getSaveFolder().then(function (p) { if (p) setSaveTarget({ kind: 'native', path: p, label: p }); });
     } else if (window.indexedDB) {
       idb('readonly', function (st) { return st.get('saveDir'); }).then(function (h) {
-        if (h && h.kind === 'directory') setSaveTarget({ kind: 'fsa', handle: h, label: h.name + ' (브라우저 폴더)' });
+        if (h && h.kind === 'directory') setSaveTarget({ kind: 'fsa', handle: h, label: h.name + ' 폴더' });
       }).catch(function () {});
     }
   }
 
   el.pickFolder.addEventListener('click', function () {
     if (native) {
-      native.chooseFolder().then(function (p) { if (p) { setSaveTarget({ kind: 'native', path: p, label: p }); setStatus('저장 폴더: ' + p); } });
+      native.chooseFolder().then(function (p) { if (p) { setSaveTarget({ kind: 'native', path: p, label: p }); turnOnAutoSave(); setStatus('저장할 곳: ' + p); } });
       return;
     }
     window.showDirectoryPicker({ id: 'autocroper-out', mode: 'readwrite' }).then(function (h) {
-      setSaveTarget({ kind: 'fsa', handle: h, label: h.name + ' (브라우저 폴더)' });
-      setStatus('저장 폴더: ' + h.name);
+      setSaveTarget({ kind: 'fsa', handle: h, label: h.name + ' 폴더' });
+      turnOnAutoSave();
+      setStatus('저장할 곳: ' + h.name + ' 폴더');
       if (window.indexedDB) idb('readwrite', function (st) { return st.put(h, 'saveDir'); }).catch(function () {});
     }).catch(function () { /* 취소 */ });
   });
+  // 폴더를 고르면 '자동으로 저장'을 기본으로 켠다(원하면 끌 수 있음)
+  function turnOnAutoSave() {
+    if (!opts.autoSave) { opts.autoSave = true; syncOptionUI(); items.forEach(maybeAutoSave); }
+  }
   el.openFolder.addEventListener('click', function () { if (native && saveTarget) native.openFolder(saveTarget.path); });
   el.clearFolder.addEventListener('click', function () {
     setSaveTarget(null);
@@ -1908,7 +1916,7 @@
     $('.rot-left', node).addEventListener('click', function () { setItemRotation(it, (it.rot + 270) % 360); });
     $('.rot-right', node).addEventListener('click', function () { setItemRotation(it, (it.rot + 90) % 360); });
     it.ui.download.addEventListener('click', function () { downloadOne(it); });
-    it.ui.download.textContent = saveTarget ? '저장' : '다운로드';
+    it.ui.download.textContent = '저장';
     it.ui.rotLabel.textContent = it.rot + '°';
     if (src.before && src.before.parentNode === el.list) {
       el.list.insertBefore(node, src.before);
@@ -2433,11 +2441,29 @@
   /* 스캔 (데스크톱 앱): Windows 스캐너(WIA)로 바로 스캔해 그대로 처리 · 저장 */
   if (native && typeof native.scanDevices === 'function') {
     var sc = {
-      panel: $('#scan-panel'), btn: $('#scan-btn'), dev: $('#scan-device'), dpi: $('#scan-dpi'),
+      panel: $('#scan-panel'), btn: $('#scan-btn'), btnText: $('#scan-btn-text'), dev: $('#scan-device'), dpi: $('#scan-dpi'),
       color: $('#scan-color'), refresh: $('#scan-refresh'), status: $('#scan-status'),
+      summary: $('#scan-summary'), summaryText: $('#scan-summary-text'),
+      area: $('#scan-area'), areaField: $('#scan-area-field'),
       devices: [], source: 'flatbed', busy: false
     };
     sc.panel.hidden = false;
+    sc.btn.hidden = false;
+    sc.summary.hidden = false;
+    sc.btn.parentNode.classList.add('has-scan');
+    var hasArea = typeof native.warmScanner === 'function'; // 스캔 범위는 새 데스크톱 연결부에서만
+    if (hasArea) sc.areaField.hidden = false;
+    var syncSummary = function () {
+      var d = sc.devices.filter(function (x) { return x.id === sc.dev.value; })[0];
+      if (!d) { sc.summaryText.textContent = '스캐너를 찾지 못했어요'; return; }
+      sc.summaryText.textContent = '스캐너: ' + d.name + ' · ' + (sc.source === 'feeder' ? '자동 급지대' : '유리판') + ' · ' +
+        (sc.color.value === 'gray' ? '흑백' : '컬러') + ' · ' + sc.dpi.value + 'dpi' + (hasArea && sc.area.value !== 'full' ? ' · ' + sc.area.options[sc.area.selectedIndex].textContent.replace(/ \(.*\)$/, '') : '');
+    };
+    $('#scan-settings-link').addEventListener('click', function () {
+      var adv = $('#advanced'); adv.open = true;
+      sc.panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+    [sc.dpi, sc.color, sc.area].forEach(function (x) { if (x) x.addEventListener('change', syncSummary); });
     var setScanStatus = function (t) { sc.status.textContent = t || ''; };
     var syncSource = function () {
       var d = sc.devices.filter(function (x) { return x.id === sc.dev.value; })[0];
@@ -2448,6 +2474,7 @@
         b.setAttribute('aria-pressed', String(b.dataset.src === sc.source));
         b.disabled = b.dataset.src === 'feeder' ? !feederOk : !flatOk;
       });
+      syncSummary();
     };
     var loadDevices = function (prefer) {
       setScanStatus('스캐너를 찾는 중…');
@@ -2460,11 +2487,12 @@
         });
         if (prefer && sc.devices.some(function (d) { return d.id === prefer; })) sc.dev.value = prefer;
         if (!sc.devices.length) {
-          var o = document.createElement('option'); o.textContent = '스캐너 없음'; sc.dev.appendChild(o);
-          setScanStatus((r && !r.ok && r.error ? r.error + ' ' : '') + '스캐너를 찾지 못했습니다. Windows에 스캐너로 등록돼 있어야 합니다: 설정 → Bluetooth 및 장치 → 장치 추가에서 스캐너를 추가하거나, 제조사 스캔 드라이버(삼성 · HP 등)를 설치한 뒤 ↻를 누르세요. 쓰던 스캔 프로그램이 있다면 왼쪽 \'감시 폴더\'로도 연동할 수 있습니다.');
+          var o = document.createElement('option'); o.textContent = '찾은 스캐너 없음'; sc.dev.appendChild(o);
+          setScanStatus((r && !r.ok && r.error ? r.error + ' ' : '') + '스캐너를 찾지 못했어요. Windows에 스캐너로 등록돼 있어야 합니다: 설정 → Bluetooth 및 장치 → 장치 추가에서 스캐너를 추가하거나, 제조사 스캔 드라이버(삼성 · HP 등)를 설치한 뒤 고급 설정 → 스캔 설정의 \'다시 찾기\'를 누르세요. 쓰던 스캔 프로그램이 있다면 고급 설정의 \'다른 스캔 프로그램과 연결\'로도 쓸 수 있어요.');
         } else {
           setScanStatus('');
           sc.btn.disabled = false;
+          if (hasArea) native.warmScanner(sc.dev.value).catch(function () {});
         }
         syncSource();
       }).catch(function () { setScanStatus('스캐너 목록을 불러오지 못했습니다.'); });
@@ -2472,7 +2500,10 @@
     document.querySelectorAll('[data-src]').forEach(function (b) {
       b.addEventListener('click', function () { sc.source = b.dataset.src; syncSource(); });
     });
-    sc.dev.addEventListener('change', syncSource);
+    sc.dev.addEventListener('change', function () {
+      syncSource();
+      if (hasArea && sc.dev.value) native.warmScanner(sc.dev.value).catch(function () {}); // 미리 연결해 두기
+    });
     sc.refresh.addEventListener('click', function () { loadDevices(sc.dev.value); });
     if (typeof native.onScanProgress === 'function') {
       native.onScanProgress(function (p) {
@@ -2487,12 +2518,14 @@
       if (sc.busy) { if (native.cancelScan) native.cancelScan(); return; }
       if (!sc.devices.length) return;
       sc.busy = true;
-      sc.btn.textContent = '취소';
+      sc.btnText.textContent = '스캔 취소';
       sc.btn.classList.add('is-busy');
       setScanStatus('스캔 중…');
       var t0 = performance.now();
       sc.tReady = 0; sc.tPage = 0;
-      native.scan({ deviceId: sc.dev.value, source: sc.source, dpi: Number(sc.dpi.value), color: sc.color.value }).then(function (r) {
+      var scanOpts = { deviceId: sc.dev.value, source: sc.source, dpi: Number(sc.dpi.value), color: sc.color.value };
+      if (hasArea) scanOpts.area = sc.area.value;
+      native.scan(scanOpts).then(function (r) {
         // 도중에 실패 · 취소해도 이미 받은 장은 연다
         var got = (r && r.files) || [];
         if (got.length) {
@@ -2511,7 +2544,7 @@
         setScanStatus('스캔하지 못했습니다: ' + ((err && err.message) || err));
       }).then(function () {
         sc.busy = false;
-        sc.btn.textContent = '스캔';
+        sc.btnText.textContent = '스캔하기';
         sc.btn.classList.remove('is-busy');
       });
     });
@@ -2521,6 +2554,7 @@
       if (st.source === 'feeder' || st.source === 'flatbed') sc.source = st.source;
       if (st.dpi) sc.dpi.value = String(st.dpi);
       if (st.color) sc.color.value = st.color;
+      if (hasArea && st.area) sc.area.value = st.area;
       return loadDevices(st.deviceId);
     }).catch(function () { loadDevices(); });
   }
@@ -2530,16 +2564,16 @@
     var wf = { opt: $('#watch-opt'), label: $('#watch-folder'), pick: $('#pick-watch-btn'), stop: $('#stop-watch-btn') };
     wf.opt.hidden = false;
     var showWatch = function (p) {
-      wf.label.textContent = p ? p : '꺼짐';
+      wf.label.textContent = p ? p : '연결 안 함';
       wf.label.classList.toggle('is-set', !!p);
       wf.stop.hidden = !p;
     };
     native.getWatchFolder().then(showWatch).catch(function () {});
     wf.pick.addEventListener('click', function () {
-      native.chooseWatchFolder().then(function (p) { if (p) { showWatch(p); setStatus('감시 중: ' + p + ' — 새 스캔 파일이 생기면 자동으로 처리합니다.'); } });
+      native.chooseWatchFolder().then(function (p) { if (p) { showWatch(p); setStatus('연결했어요: ' + p + ' 에 새 사진이 생기면 자동으로 불러옵니다.'); } });
     });
     wf.stop.addEventListener('click', function () {
-      native.stopWatch().then(function () { showWatch(null); setStatus('감시 폴더를 껐습니다.'); });
+      native.stopWatch().then(function () { showWatch(null); setStatus('다른 스캔 프로그램과의 연결을 끊었어요.'); });
     });
   }
 
