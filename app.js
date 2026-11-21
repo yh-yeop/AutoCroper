@@ -655,6 +655,12 @@
       b.setAttribute('aria-pressed', String(b.dataset.format === opts.format));
     });
     saveSettings();
+    // 접힌 '고급 설정' 제목 옆에 기본값과 다르게 바꾼 옵션 수
+    var changed = ['threshold', 'noise', 'padding', 'trim', 'deskew', 'split', 'format', 'quality'].filter(function (k) {
+      return opts[k] !== DEFAULTS[k] && !(k === 'quality' && opts.format !== 'jpeg');
+    }).length + (opts.rotation ? 1 : 0);
+    var badge = document.getElementById('adv-changed');
+    if (badge) { badge.hidden = !changed; badge.textContent = changed + '개 변경됨'; }
   }
 
   var redrawQueued = false;

@@ -98,6 +98,22 @@ input[type="number"] {
 .seg button[aria-pressed="true"] { background: var(--accent); color: var(--accent-text); font-weight: 600; }
 .link { justify-self: start; background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; font-size: 0.85rem; }
 
+/* 고급 설정(기본 접힘) */
+.advanced { border-top: 1px solid var(--border); margin: 0 -16px -14px; padding: 0 16px; }
+.advanced > summary {
+  list-style: none; cursor: pointer; display: flex; align-items: center; gap: 8px;
+  padding: 12px 0; font-weight: 600; font-size: 0.92rem; user-select: none;
+}
+.advanced > summary::-webkit-details-marker { display: none; }
+.advanced > summary::after {
+  content: ""; margin-left: auto; width: 8px; height: 8px; flex: none;
+  border-right: 2px solid var(--muted); border-bottom: 2px solid var(--muted);
+  transform: rotate(45deg) translateY(-2px); transition: transform .15s;
+}
+.advanced[open] > summary::after { transform: rotate(-135deg) translateY(-2px); }
+.adv-changed { font-weight: 500; font-size: 0.8rem; color: var(--accent); }
+.adv-body { display: grid; gap: 14px; padding-bottom: 14px; }
+
 /* 버튼 */
 .primary, .ghost, .icon {
   border-radius: 8px; cursor: pointer; padding: 8px 14px; border: 1px solid transparent;
