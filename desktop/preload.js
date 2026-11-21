@@ -63,12 +63,12 @@ function deliverUpdate(status, only) {
   });
 }
 
-// 스캔 진행: { state: 'scanning' | 'page', page? }
+// 스캔 진행: { state: 'scanning' | 'ready' | 'page', page? }
 const scanSubscribers = [];
 let scanListening = false;
 
 function normalizeScanProgress(p) {
-  if (!p || typeof p !== 'object' || (p.state !== 'scanning' && p.state !== 'page')) return null;
+  if (!p || typeof p !== 'object' || (p.state !== 'scanning' && p.state !== 'ready' && p.state !== 'page')) return null;
   const out = { state: p.state };
   if (Number.isInteger(p.page) && p.page > 0) out.page = p.page;
   return out;

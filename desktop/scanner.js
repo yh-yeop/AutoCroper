@@ -292,7 +292,7 @@ function createScanner(o) {
     for (const pg of pages) {
       const fileName = path.basename(String(pg.file || ''));
       const ext = path.extname(fileName).toLowerCase();
-      if (ext !== '.png' && ext !== '.bmp') continue;
+      if (ext !== '.png' && ext !== '.bmp' && ext !== '.jpg') continue;
       const p = path.join(outDir, fileName);
       try {
         const st = await fsp.stat(p);
@@ -302,7 +302,7 @@ function createScanner(o) {
         total += buf.byteLength;
         files.push({
           name: '스캔_' + base + '_' + (files.length + 1) + ext,
-          type: ext === '.png' ? 'image/png' : 'image/bmp',
+          type: ext === '.png' ? 'image/png' : ext === '.jpg' ? 'image/jpeg' : 'image/bmp',
           data: new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength)
         });
       } catch (_) { /* 읽지 못한 장은 건너뛴다 */ }
@@ -348,6 +348,8 @@ function createScanner(o) {
         timeout,
         onSpawn: ({ kill }) => { thisJob.kill = kill; if (thisJob.cancelled) kill(); },
         onEvent: (ev) => {
+          // 스캐너 연결 · 설정이 끝나 실제 스캔을 시작하는 순간(화면에서 '준비' 시간 계산용)
+          if (ev.type === 'scanning') progress({ state: 'ready' });
           if (ev.type === 'page' && Number.isInteger(ev.page) && ev.page > 0 && typeof ev.file === 'string') {
             pages.push(ev);
             progress({ state: 'page', page: pages.length });

@@ -16,7 +16,8 @@
  *     6146 WIA_IPS_CUR_INTENT (1 COLOR, 2 GRAYSCALE, 4 TEXT), 6147/6148 WIA_IPS_XRES/YRES,
  *     6149/6150 WIA_IPS_XPOS/YPOS, 6151/6152 WIA_IPS_XEXTENT/YEXTENT
  *   형식 GUID: BMP {B96B3CAB-...}, PNG {B96B3CAF-...}, JPEG {B96B3CAE-...} (-0728-11D3-9D7B-0000F81EF32E)
- *   스캔은 모든 WIA 스캐너 드라이버가 지원하는 BMP 로 받고, WIA.ImageProcess 의 Convert 필터로 PNG(무손실)로 바꾼다.
+ *   속도를 위해 드라이버가 JPEG 전송을 지원하면 JPEG 로 받고(스캐너 쪽에서 압축 → 전송량 약 1/10),
+ *   아니면 BMP 로 받아 변환 없이 그대로 넘긴다(앱이 BMP 를 바로 연다).
  *   (변환이 실패하면 BMP 그대로 둔다.) */
 
 const COMMON = String.raw`
@@ -86,7 +87,7 @@ try {
   $list = @()
   foreach ($di in $dm.DeviceInfos) {
     try {
-      # 1 = 스캐너. 일부 드라이버는 0(미지정) 등으로 알리므로 카메라(2) · 비디오(3)만 뺀다
+      # 1 = scanner. Some drivers report 0 (unspecified); skip only camera (2) and video (3).
       if ($di.Type -eq 2 -or $di.Type -eq 3) { continue }
       $id = [string]$di.DeviceID
       $name = [string](Get-PropValue $di.Properties 7 '')
@@ -120,6 +121,7 @@ param([string]$JobFile)
 ` + COMMON + String.raw`
 $FMT_BMP = '{B96B3CAB-0728-11D3-9D7B-0000F81EF32E}'
 $FMT_PNG = '{B96B3CAF-0728-11D3-9D7B-0000F81EF32E}'
+$FMT_JPEG = '{B96B3CAE-0728-11D3-9D7B-0000F81EF32E}'
 $PAPER_EMPTY = '0x80210003'
 
 function Set-Prop($props, [int]$id, $value) {
@@ -164,24 +166,21 @@ function Set-Nearest($props, [int]$id, [int]$value) {
 }
 
 function Save-Page($img, [int]$n) {
-  $png = Join-Path $script:OutDir ('page_{0:D3}.png' -f $n)
-  try {
-    if ([string]$img.FormatID -eq $FMT_PNG) {
-      $img.SaveFile($png)
-    } else {
-      $ip = New-Object -ComObject WIA.ImageProcess
-      $ip.Filters.Add($ip.FilterInfos.Item('Convert').FilterID)
-      $ip.Filters.Item(1).Properties.Item('FormatID').Value = $FMT_PNG
-      $conv = $ip.Apply($img)
-      $conv.SaveFile($png)
-    }
-    return @{ file = [IO.Path]::GetFileName($png); format = 'png' }
-  } catch {
-    if (Test-Path -LiteralPath $png) { Remove-Item -LiteralPath $png -Force -ErrorAction SilentlyContinue }
-    $bmp = Join-Path $script:OutDir ('page_{0:D3}.bmp' -f $n)
-    $img.SaveFile($bmp)
-    return @{ file = [IO.Path]::GetFileName($bmp); format = 'bmp' }
-  }
+  $fmt = ([string]$img.FormatID).ToUpper()
+  $ext = 'bmp'
+  if ($fmt -eq $FMT_JPEG) { $ext = 'jpg' } elseif ($fmt -eq $FMT_PNG) { $ext = 'png' }
+  $out = Join-Path $script:OutDir ('page_{0:D3}.{1}' -f $n, $ext)
+  $img.SaveFile($out)
+  return @{ file = [IO.Path]::GetFileName($out); format = $ext }
+}
+
+# Fastest transfer format the driver advertises: JPEG > PNG > BMP
+function Pick-Format($item) {
+  $fmts = @()
+  try { foreach ($f in $item.Formats) { $fmts += ([string]$f).ToUpper() } } catch { }
+  if ($fmts -contains $FMT_JPEG) { return $FMT_JPEG }
+  if ($fmts -contains $FMT_PNG) { return $FMT_PNG }
+  return $FMT_BMP
 }
 
 $page = 0
@@ -257,7 +256,8 @@ try {
   if ($null -ne $hMax -and $hMax -gt 0) { $hOk = Set-Prop $item.Properties 6152 $hMax }
   if ((-not $hOk) -and $null -ne $hCalc) { $hOk = Set-Prop $item.Properties 6152 $hCalc }
 
-  Emit @{ type = 'scanning'; dpi = $xres; extent = ($wOk -and $hOk) }
+  $xferFmt = Pick-Format $item
+  Emit @{ type = 'scanning'; dpi = $xres; extent = ($wOk -and $hOk); format = $xferFmt }
 
   while ($page -lt $maxPages) {
     if ($feed -and $page -gt 0) {
@@ -266,11 +266,15 @@ try {
     }
     $img = $null
     try {
-      $img = $item.Transfer($FMT_BMP)
+      $img = $item.Transfer($xferFmt)
     } catch {
       $hr = Hex (Get-HResult $_)
       if ($feed -and $page -gt 0 -and $hr -eq $PAPER_EMPTY) { break }
-      throw
+      # If the advertised format is rejected, retry once with BMP (first page only, so the feeder never pulls a sheet twice).
+      if ($page -eq 0 -and $xferFmt -ne $FMT_BMP) {
+        $xferFmt = $FMT_BMP
+        $img = $item.Transfer($xferFmt)
+      } else { throw }
     }
     if ($null -eq $img) { break }
     $page++

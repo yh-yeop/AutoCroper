@@ -2331,6 +2331,9 @@
     if (typeof native.onScanProgress === 'function') {
       native.onScanProgress(function (p) {
         if (!sc.busy || !p) return;
+        var now = performance.now();
+        if (p.state === 'ready' && !sc.tReady) sc.tReady = now;
+        if (p.state === 'page') sc.tPage = now;
         setScanStatus(p.state === 'page' && p.page ? '스캔 중… ' + p.page + '쪽 받음' : '스캔 중…');
       });
     }
@@ -2342,6 +2345,7 @@
       sc.btn.classList.add('is-busy');
       setScanStatus('스캔 중…');
       var t0 = performance.now();
+      sc.tReady = 0; sc.tPage = 0;
       native.scan({ deviceId: sc.dev.value, source: sc.source, dpi: Number(sc.dpi.value), color: sc.color.value }).then(function (r) {
         // 도중에 실패 · 취소해도 이미 받은 장은 연다
         var got = (r && r.files) || [];
@@ -2350,7 +2354,10 @@
             try { return new File([f.data], f.name, { type: f.type || 'image/png' }); } catch (_) { return null; }
           }).filter(Boolean));
         }
-        var secs = ((performance.now() - t0) / 1000).toFixed(0) + '초';
+        // 어디서 느린지 보이게: 준비(스캐너 연결 · 설정) · 스캔 · 전송 · 불러오기
+        var tEnd = performance.now(), f1 = function (ms) { return (ms / 1000).toFixed(1) + '초'; };
+        var secs = f1(tEnd - t0);
+        if (sc.tReady && sc.tPage) secs += ' (준비 ' + f1(sc.tReady - t0) + ' · 스캔·전송 ' + f1(sc.tPage - sc.tReady) + ' · 불러오기 ' + f1(tEnd - sc.tPage) + ')';
         if (r && r.ok) setScanStatus(got.length + '쪽 스캔 완료 · ' + secs + (r.error ? ' · ' + r.error : ''));
         else if (r && r.cancelled) setScanStatus('스캔을 취소했습니다.' + (got.length ? ' 받은 ' + got.length + '쪽은 열었습니다.' : ''));
         else setScanStatus(((r && r.error) || '스캔하지 못했습니다.') + (got.length ? ' (받은 ' + got.length + '쪽은 열었습니다)' : ''));
