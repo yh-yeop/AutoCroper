@@ -603,24 +603,28 @@
 
   /* ───────── 여러 장 분리 (한 번에 여러 사진을 스캔한 파일) ───────── */
   /* ───────────── 여러 장 사진 나누기 (스캔 한 장에 사진 여러 장) ─────────────
-   * 흰 종이 위에 놓인 사진 여러 장을 각각의 영역으로 나눈다. 두 단계 격자를 쓴다.
+   * 흰 종이 위에 놓인 사진 여러 장을 각각의 영역으로 나눈다. 두 단계 격자를 쓴다. 사진 기울기는 제한 없음(±45°).
    *  [거친 격자] 칸 = 최소 틈(짧은 변의 1%, 8px 이상)의 1/5.
    *   1) 종이 밝기에서 두 기준을 잡는다: tL = 밝은 픽셀 중앙값 + 10(사진 판정), tP = 종이 잡음 바로 위
-   *      (아주 밝은 사진 판정). 칸 안 표본의 절반 이상이 d > tL 이면 꽉 찬 칸.
+   *      (아주 밝은 사진 판정). 칸 안 표본의 절반 이상이 d > tL 이면 꽉 찬 칸. (표본 세기는 표 하나로 네 개수를 묶어 센다)
    *   2) 페이지 가장자리를 따라 길게 이어진 거의 검은 띠(스캐너 덮개 테두리)는 먼저 지운다.
-   *   3) 3×3 닫기 → 4-연결 성분 → 완전히 둘러싸인 구멍 메우기. 성분마다 꽉 찬 칸 비율을 잰다
-   *      (사진 ≈ 1.0, 글자 덩어리 ≤ 0.55).
-   *  [고운 격자] 블록 = 2px(해상도에 따라 1~4px). 꽉 찬 비율 ≥ 0.6 인 성분 안에서만 만든다.
-   *   4) 블록 안 픽셀의 3/4 이상이 d > tL 이면 내용. 다시 4-연결 성분 + 구멍 메우기 → 3~12px 의
-   *      좁은 틈(기운 틈 포함)으로 떨어진 사진이 따로 잡힌다.
-   *   5) 조각 합치기: 한 조각이 다른 조각의 기운 사각형 안에 대부분 들면 합치고, 두 조각이 한 사진의
-   *      일부처럼 끝이 맞고(틈이 가늘거나 마주 보는 변이 들쭉날쭉) 틈 양쪽 내용이 이어지면(상관 ≥ 0.45)
-   *      합친다 — 사진 속 흰 선 · 밝은 줄기로 갈라진 한 장을 되살린다.
+   *   3) 3×3 닫기 → 4-연결 성분 → 구멍 메우기. 구멍 안에 섬(나무 · 사람 등 다른 성분)이 있어도 둘러싼 성분이
+   *      하나뿐이면 구멍과 섬을 그 성분에 넣는다(테두리 진한 밝은 사진). 성분마다 꽉 찬 칸 비율을 잰다.
+   *  [고운 격자] 블록 = 2px(해상도에 따라 1~4px). 꽉 찬 비율 ≥ 0.6 이고 표본이 모두 d > tL 인 칸 ≥ 30% 인
+   *     성분(글자 덩어리 제외)마다, 그 성분 상자 안에서만 만든다.
+   *   4) 블록 안 픽셀의 3/4 이상이 d > tL 이면 내용. 단 조금 진한 픽셀(d ≤ 3·tL)이 양옆(위아래) 3px 보다 훨씬
+   *      밝으면 종이로 본다(JPEG 울림이 낀 좁은 틈). 표본이 모두 d > T 인 칸만 픽셀을 다시 보지 않는다.
+   *      다시 4-연결 성분 + 구멍 메우기 → 3~12px 의 좁은 틈(기운 틈 포함)으로 떨어진 사진이 따로 잡힌다.
+   *   5) 조각 합치기: 한 조각이 다른 조각의 기운 사각형 안에 대부분 들면 합치고, 두 조각을 합친 기운 사각형 축에서
+   *      한쪽으로 겹치고 다른 쪽으로 떨어져 있으며 끝이 맞고(틈이 가늘거나 마주 보는 변이 들쭉날쭉) 틈 양쪽 내용이
+   *      이어지면(상관 ≥ 0.45) 합친다 — 사진 속 흰 선 · 밝은 줄기로 갈라진 한 장을 되살린다. 끝이 정확히 맞는 가는
+   *      틈은 기본으로 합치되, 양쪽이 무관하고(상관 < 0.25) 밝기가 크게 다르면 끝을 맞춰 붙인 두 장으로 둔다.
    *   6) 한 성분을 고운 조각으로 나누는 건 조각이 2개 이상, 성분 넓이의 80% 이상을 덮고, 모두 사진다울
    *      때만. 아니면 성분 전체를 한 조각으로 쓴다.
    *  7) 사진다움: 꽉 찬 비율 ≥ 0.7, 넓이 ≥ 1.5%(두께 ≥ 짧은 변의 5%, 기운 사각형 채움 ≥ 0.75) 또는
-   *     넓이 ≥ 0.15% 의 반듯한 사각형(채움 ≥ 0.85, 두께 ≥ 2%). 밝은 사진은 채움 ≥ 0.85 이고
-   *     사각형 둘레 띠의 75% 이상이 꽉 차 있으며 안쪽이 종이보다 진하면(tP) 인정.
+   *     넓이 ≥ 0.15% 의 반듯한 사각형(채움 ≥ 0.85, 두께 ≥ 2%). 기운 사각형은 볼록 껍질의 모든 변 방향에서 찾는다.
+   *     밝은 사진은 채움 ≥ 0.85 이고 사각형 네 변의 90% 이상을 테두리(꽉 찬 칸)가 덮으며, 안쪽이 종이보다
+   *     진하면(tP 기준 또는 주변 종이 90% 백분위수 기준) 인정.
    *  8) 사진 밖에 남은 내용이 넓으면(성분 넓이 > 페이지의 8% 또는 진한 픽셀 > 25%) 문서로 보고 나누지 않는다.
    * 반환: { regions: [{x0,y0,x1,y1,label,fill}], grid: {cell,gw,gh,labels}, split, reason, stray, strayArea,
    *         lightThreshold, paperThreshold, strip }
@@ -656,21 +660,31 @@
     res.lightThreshold = tL; res.paperThreshold = tP;
 
     // 2) 칸별 표본 수: d > tP, d > tL, d > T, d > 200(거의 검정). 칸이 4px 이상이면 2×2 마다 하나만 본다.
-    var st = cell >= 4 ? 2 : 1;
+    var st = cell >= 4 ? (cell > 500 ? Math.ceil(cell / 250) : 2) : 1;
     var cntP = new Int32Array(N), cntL = new Int32Array(N), cntT = new Int32Array(N), cntK = new Int32Array(N);
     var colN = new Int32Array(gw), rowN = new Int32Array(gh);
     for (gx = 0; gx < gw; gx++) colN[gx] = Math.ceil((Math.min(W, gx * cell + cell) - gx * cell) / st);
     for (gy = 0; gy < gh; gy++) rowN[gy] = Math.ceil((Math.min(H, gy * cell + cell) - gy * cell) / st);
+    // 표 하나로 네 개수를 8비트씩 묶어 정수 하나에 더한다. 칸 한 줄(띠)의 표본이 255 개 이하가 되게
+    // 띠 안 여러 행을 모은 뒤 칸마다 한 번 풀어 놓는다(넘치면 행마다 푼다).
+    var lut = new Int32Array(256);
+    for (i = 0; i < 256; i++) lut[i] = (i > tP ? 1 : 0) | (i > tL ? 256 : 0) | (i > T ? 65536 : 0) | (i > 200 ? 16777216 : 0);
+    var acc = new Int32Array(gw), perRow = Math.ceil(cell / st) * Math.ceil(cell / st) > 255, nS = 0;
+    for (gx = 0; gx < gw; gx++) nS += colN[gx];
+    var sxs = new Int32Array(nS), scs = new Int32Array(nS); // 표본 x(칸마다 칸 시작부터 st 간격)와 그 칸
+    for (gx = 0, i = 0; gx < gw; gx++) for (x = gx * cell; x < Math.min(W, gx * cell + cell); x += st, i++) { sxs[i] = x; scs[i] = gx; }
     for (gy = 0; gy < gh; gy++) {
       var rb = gy * gw, yEnd = Math.min(H, gy * cell + cell);
-      for (y = gy * cell; y < yEnd; y += st) {
-        var k0 = y * W;
-        for (gx = 0, x = 0; gx < gw; gx++, x += cell) {
-          var ke = k0 + Math.min(W, x + cell), np = 0, nl = 0, nt = 0, nk = 0, d;
-          for (var kk = k0 + x; kk < ke; kk += st) {
-            d = dm[kk]; np += d > tP ? 1 : 0; nl += d > tL ? 1 : 0; nt += d > T ? 1 : 0; nk += d > 200 ? 1 : 0;
+      for (y = gy * cell; y < yEnd; y++) {
+        if ((y - gy * cell) % st) continue;
+        for (var k0 = y * W, si = 0; si < nS; si++) acc[scs[si]] = (acc[scs[si]] + lut[dm[k0 + sxs[si]]]) | 0;
+        if (perRow || y + st >= yEnd) { // 띠 끝(또는 넘칠 수 있으면 행마다)에서 칸별로 풀어 놓는다
+          for (var g = 0; g < gw; g++) {
+            var v = acc[g];
+            if (!v) continue;
+            cntP[rb + g] += v & 255; cntL[rb + g] += (v >>> 8) & 255; cntT[rb + g] += (v >>> 16) & 255; cntK[rb + g] += v >>> 24;
+            acc[g] = 0;
           }
-          if (np) { cntP[rb + gx] += np; cntL[rb + gx] += nl; cntT[rb + gx] += nt; cntK[rb + gx] += nk; }
         }
       }
     }
@@ -692,12 +706,13 @@
     var C = new Int32Array(N);
     var nC = splitLabel(splitMorph(splitMorph(rawL, gw, gh, 1, true), gw, gh, 1, false), gw, gh, C);
     if (!nC) { res.reason = 'blank'; return res; }
-    var area = new Int32Array(nC + 1), rl = new Int32Array(nC + 1), rp = new Int32Array(nC + 1);
+    var area = new Int32Array(nC + 1), rl = new Int32Array(nC + 1), rp = new Int32Array(nC + 1), rf = new Int32Array(nC + 1);
     var bx0 = new Int32Array(nC + 1).fill(gw), by0 = new Int32Array(nC + 1).fill(gh), bx1 = new Int32Array(nC + 1).fill(-1), by1 = new Int32Array(nC + 1).fill(-1);
     for (gy = 0, i = 0; gy < gh; gy++) for (gx = 0; gx < gw; gx++, i++) {
       L = C[i];
       if (!L) continue;
       area[L]++; rl[L] += rawL[i]; rp[L] += rawP[i];
+      if (cntL[i] === colN[gx] * rowN[gy]) rf[L]++;
       if (gx < bx0[L]) bx0[L] = gx; if (gx > bx1[L]) bx1[L] = gx;
       if (gy < by0[L]) by0[L] = gy; if (gy > by1[L]) by1[L] = gy;
     }
@@ -707,7 +722,10 @@
       var P = splitMakePiece(L, area[L], rl[L], rp[L], bx0[L], by0[L], bx1[L], by1[L], C, gw);
       P.band = P.raw < 0.7 * P.area ? splitBand(C, rawL, gw, P) : null;
       P.tint = P.band != null && P.band >= 0.9 ? splitTint(dm, W, H, C, rawL, gw, gh, cell, P) : 0;
-      if (P.raw >= 0.6 * P.area) elig[L] = 1;
+      // 고운 격자로 나눠 볼 성분: 꽉 찬 칸 ≥ 60% 이고, 표본이 모두 d > tL 인 칸 ≥ 30%(사진 안쪽).
+      // 글자 덩어리는 획 사이가 비어 후자가 낮으므로 비싼 고운 격자를 건너뛴다(어차피 사진 조각이 안 나온다).
+      if (P.raw >= 0.6 * P.area && rf[L] >= 0.3 * P.area) elig[L] = 1;
+      P.full = rf[L] / P.area;
       cp.push(P);
     }
 
@@ -716,16 +734,25 @@
     var bmask = new Uint8Array(NB), blkCx = new Int32Array(bw), blkCy = new Int32Array(bh);
     for (x = 0; x < bw; x++) blkCx[x] = ((x * f) / cell) | 0;
     for (y = 0; y < bh; y++) blkCy[y] = ((y * f) / cell) | 0;
-    for (gy = 0, i = 0; gy < gh; gy++) {
-      var byA = Math.ceil(gy * cell / f), byB = Math.ceil(Math.min(H, gy * cell + cell) / f) - 1;
-      for (gx = 0; gx < gw; gx++, i++) {
+    var cbx0 = new Int32Array(gw), cbx1 = new Int32Array(gw);
+    for (gx = 0; gx < gw; gx++) { cbx0[gx] = Math.ceil(gx * cell / f); cbx1[gx] = Math.ceil(Math.min(W, gx * cell + cell) / f) - 1; }
+    for (gy = 0; gy < gh; gy++) {
+      var byA = Math.ceil(gy * cell / f), byB = Math.ceil(Math.min(H, gy * cell + cell) / f) - 1, rn = rowN[gy];
+      for (gx = 0; gx < gw; gx++) {
+        i = gy * gw + gx;
         if (!elig[C[i]]) continue;
-        var full = cntT[i] === colN[gx] * rowN[gy]; // 표본이 모두 d > T 인 칸만 통째로 내용(울림 낀 좁은 틈은 표본 사이에 숨을 수 있다)
-        var bxA = Math.ceil(gx * cell / f), bxB = Math.ceil(Math.min(W, gx * cell + cell) / f) - 1;
+        // 표본이 모두 d > T 인 칸만 통째로 내용(울림 낀 좁은 틈은 표본 사이에 숨을 수 있다). 이어진 칸은 한 번에 채운다.
+        if (cntT[i] === colN[gx] * rn) {
+          var ge = gx;
+          while (ge + 1 < gw && elig[C[i + ge + 1 - gx]] && cntT[i + ge + 1 - gx] === colN[ge + 1] * rn) ge++;
+          for (var by2 = byA; by2 <= byB; by2++) bmask.fill(1, by2 * bw + cbx0[gx], by2 * bw + cbx1[ge] + 1);
+          gx = ge;
+          continue;
+        }
+        var bxA = cbx0[gx], bxB = cbx1[gx];
         for (var by = byA; by <= byB; by++) {
           var py0 = by * f, py1 = Math.min(H, py0 + f);
           for (var bx = bxA; bx <= bxB; bx++) {
-            if (full) { bmask[by * bw + bx] = 1; continue; }
             var px0 = bx * f, px1 = Math.min(W, px0 + f), c = 0, tot = (py1 - py0) * (px1 - px0);
             for (y = py0; y < py1; y++) for (k = y * W + px0, x = px0; x < px1; x++, k++) {
               var dv = dm[k];
@@ -743,26 +770,60 @@
         }
       }
     }
-    var nF = splitLabel(bmask, bw, bh, flab);
+    // 고운 성분 라벨: 꽉 찬 거친 성분마다 그 상자 안(그 성분 칸의 블록만)에서 따로 매긴다 — 종이 · 다른 성분은 건너뛴다
+    var nF = 0, subM = new Uint8Array(0);
+    for (var pi = 0; pi < cp.length; pi++) {
+      var P0 = cp[pi], PL = P0.label;
+      if (!elig[PL]) continue;
+      var xa = Math.ceil(P0.gx0 * cell / f), xb = Math.min(bw, Math.ceil((P0.gx1 + 1) * cell / f)) - 1;
+      var ya = Math.ceil(P0.gy0 * cell / f), yb = Math.min(bh, Math.ceil((P0.gy1 + 1) * cell / f)) - 1;
+      var sw = xb - xa + 1, sh = yb - ya + 1, sn = sw * sh, xx, yy, cx2, cy2;
+      if (sw < 1 || sh < 1) continue;
+      if (subM.length < sn) subM = new Uint8Array(sn);
+      var m = subM.subarray(0, sn);
+      m.fill(0);
+      // 성분 칸마다 그 칸의 블록 내용을 옮긴다(같은 행의 이어진 칸은 한 번에)
+      for (cy2 = P0.gy0; cy2 <= P0.gy1; cy2++) {
+        var yA2 = Math.ceil(cy2 * cell / f), yB2 = Math.min(bh, Math.ceil(Math.min(H, cy2 * cell + cell) / f)) - 1;
+        for (cx2 = P0.gx0; cx2 <= P0.gx1; cx2++) {
+          if (C[cy2 * gw + cx2] !== PL) continue;
+          var ce2 = cx2;
+          while (ce2 < P0.gx1 && C[cy2 * gw + ce2 + 1] === PL) ce2++;
+          var xA2 = Math.ceil(cx2 * cell / f), xB2 = Math.min(bw, Math.ceil(Math.min(W, ce2 * cell + cell) / f)) - 1;
+          for (yy = yA2; yy <= yB2; yy++) m.set(bmask.subarray(yy * bw + xA2, yy * bw + xB2 + 1), (yy - ya) * sw + xA2 - xa);
+          cx2 = ce2;
+        }
+      }
+      // 라벨은 전체 격자(flab)의 해당 자리에 바로 쓴다(번호는 nF 만큼 밀어서)
+      nF += splitLabel(m, sw, sh, null, flab, bw, ya * bw + xa, nF);
+    }
     var fa = new Int32Array(nF + 1), frl = new Int32Array(nF + 1), frp = new Int32Array(nF + 1), fpar = new Int32Array(nF + 1);
     var fx0 = new Int32Array(nF + 1).fill(bw), fy0 = new Int32Array(nF + 1).fill(bh), fx1 = new Int32Array(nF + 1).fill(-1), fy1 = new Int32Array(nF + 1).fill(-1);
-    for (y = 0, k = 0; y < bh; y++) {
+    // 고운 라벨은 꽉 찬 성분 상자 안에만 있다: 그 범위만 훑는다
+    var ux0 = gw, uy0 = gh, ux1 = -1, uy1 = -1;
+    cp.forEach(function (P) { if (elig[P.label]) { ux0 = Math.min(ux0, P.gx0); uy0 = Math.min(uy0, P.gy0); ux1 = Math.max(ux1, P.gx1); uy1 = Math.max(uy1, P.gy1); } });
+    var bxa = Math.ceil(ux0 * cell / f), bxb = Math.min(bw - 1, Math.ceil((ux1 + 1) * cell / f));
+    var bya = Math.ceil(uy0 * cell / f), byb = Math.min(bh - 1, Math.ceil((uy1 + 1) * cell / f));
+    for (y = bya; y <= byb; y++) {
       var crow = blkCy[y] * gw;
-      for (x = 0; x < bw; x++, k++) {
-        L = flab[k];
+      var rowK = y * bw;
+      for (x = bxa; x <= bxb; x++) { // 같은 라벨 구간 단위로
+        L = flab[rowK + x];
         if (!L) continue;
-        var ci2 = crow + blkCx[x];
-        fa[L]++; frl[L] += rawL[ci2]; frp[L] += rawP[ci2];
-        if (!fpar[L]) fpar[L] = C[ci2];
-        if (x < fx0[L]) fx0[L] = x; if (x > fx1[L]) fx1[L] = x;
+        var xe = x, sl = 0, sp = 0;
+        while (xe < bxb && flab[rowK + xe + 1] === L) xe++;
+        for (var xq = x; xq <= xe; xq++) { var ci2 = crow + blkCx[xq]; sl += rawL[ci2]; sp += rawP[ci2]; }
+        fa[L] += xe - x + 1; frl[L] += sl; frp[L] += sp;
+        if (!fpar[L]) fpar[L] = C[crow + blkCx[x]];
+        if (x < fx0[L]) fx0[L] = x; if (xe > fx1[L]) fx1[L] = xe;
         if (y < fy0[L]) fy0[L] = y; if (y > fy1[L]) fy1[L] = y;
+        x = xe;
       }
     }
 
     // 5)~6) 성분마다: 고운 조각으로 나눌지, 성분 전체를 한 조각으로 쓸지
     var ctx = { dm: dm, W: W, H: H, f: f, labels: flab, gw: bw, gh: bh, NB: NB, shortU: Math.min(bw, bh),
-      thinGap: 0.6 * minGap / f, jag: Math.max(1.5, 7 / f), minArea: opts.minArea || 0.015, log: opts.debug ? [] : null };
-    if (opts.debug) res.mlog = ctx.log;
+      thinGap: 0.6 * minGap / f, jag: Math.max(1.5, 7 / f), minArea: opts.minArea || 0.015 };
     var byComp = {}, bigF = 0.001 * NB, nextLab = nF + 1, fin = [];
     for (L = 1; L <= nF; L++) if (fa[L] >= bigF && fpar[L]) (byComp[fpar[L]] = byComp[fpar[L]] || []).push(L);
     cp.forEach(function (P) {
@@ -782,16 +843,21 @@
         }
       }
       // 성분 전체를 한 조각으로: 성분 칸의 블록에 새 라벨
-      var lab = nextLab++, cnt = 0, qx0 = bw, qy0 = bh, qx1 = -1, qy1 = -1;
-      for (var cy = P.gy0; cy <= P.gy1; cy++) for (var cx = P.gx0; cx <= P.gx1; cx++) {
-        if (C[cy * gw + cx] !== P.label) continue;
+      var lab = nextLab++, cnt = 0;
+      for (var cy = P.gy0; cy <= P.gy1; cy++) {
         var yA = Math.ceil(cy * cell / f), yB = Math.ceil(Math.min(H, cy * cell + cell) / f) - 1;
-        var xA = Math.ceil(cx * cell / f), xB = Math.ceil(Math.min(W, cx * cell + cell) / f) - 1;
-        for (var yy = yA; yy <= yB; yy++) for (var xx = xA; xx <= xB; xx++) {
-          flab[yy * bw + xx] = lab; cnt++;
-          if (xx < qx0) qx0 = xx; if (xx > qx1) qx1 = xx; if (yy < qy0) qy0 = yy; if (yy > qy1) qy1 = yy;
+        for (var cx = P.gx0; cx <= P.gx1; cx++) {
+          if (C[cy * gw + cx] !== P.label) continue;
+          var ce = cx;
+          while (ce + 1 <= P.gx1 && C[cy * gw + ce + 1] === P.label) ce++;
+          var xA = Math.ceil(cx * cell / f), xB = Math.ceil(Math.min(W, ce * cell + cell) / f) - 1;
+          for (var yy = yA; yy <= yB; yy++) flab.fill(lab, yy * bw + xA, yy * bw + xB + 1);
+          if (xB >= xA && yB >= yA) cnt += (xB - xA + 1) * (yB - yA + 1);
+          cx = ce;
         }
       }
+      var qx0 = Math.ceil(P.gx0 * cell / f), qy0 = Math.ceil(P.gy0 * cell / f);
+      var qx1 = Math.ceil(Math.min(W, P.gx1 * cell + cell) / f) - 1, qy1 = Math.ceil(Math.min(H, P.gy1 * cell + cell) / f) - 1;
       if (!cnt) return;
       var Q = splitMakePiece(lab, cnt, cnt * P.raw / P.area, cnt * P.rawP / P.area, qx0, qy0, qx1, qy1, flab, bw);
       Q.comp = P.label; Q.band = P.band; Q.tint = P.tint;
@@ -812,10 +878,12 @@
     // 8) 후보 밖에 남은 내용: 후보 블록이 닿은 칸(1칸 넓힘) 밖의 진한 픽셀 비율과 성분 넓이
     var candLab = new Uint8Array(nextLab + 1), cov2 = new Uint8Array(N), inkOut = 0, strayCells = 0;
     cands.forEach(function (q) { candLab[q.label] = 1; });
-    for (y = 0, k = 0; y < bh; y++) {
-      var crow2 = blkCy[y] * gw;
-      for (x = 0; x < bw; x++, k++) if (candLab[flab[k]]) cov2[crow2 + blkCx[x]] = 1;
-    }
+    cands.forEach(function (q) { // 후보 상자 안만 훑는다
+      for (var yq = q.gy0; yq <= q.gy1; yq++) {
+        var crow2 = blkCy[yq] * gw, kq = yq * bw;
+        for (var xq = q.gx0; xq <= q.gx1; xq++) if (flab[kq + xq] === q.label) cov2[crow2 + blkCx[xq]] = 1;
+      }
+    });
     cov2 = splitMorph(cov2, gw, gh, 1, true);
     var strayMin = 0.0002 * N;
     for (i = 0; i < N; i++) {
@@ -844,7 +912,8 @@
       rowL: new Int32Array(y1 - y0 + 1).fill(-1), rowR: new Int32Array(y1 - y0 + 1).fill(-1),
       colT: new Int32Array(x1 - x0 + 1).fill(-1), colB: new Int32Array(x1 - x0 + 1).fill(-1) };
     splitEnvelope(P, labels, gw);
-    P.rect = splitMinRect(splitHullPts(P));
+    P.hull = splitHull(splitHullPts(P));
+    P.rect = splitMinRect(P.hull);
     P.fill = P.area / P.rect.area;
     return P;
   }
@@ -959,10 +1028,10 @@
     return cur;
   }
 
-  /* 4-연결 성분 라벨링 + 구멍 메우기. 각 행을 같은 값의 구간(run)으로 나누고, 위아래로 겹치는
+  /* 4-연결 성분 라벨링 + 구멍 메우기. out 을 주면 labels 대신 out[off + y*stride + x] 에 (라벨 + base)를 쓴다. 각 행을 같은 값의 구간(run)으로 나누고, 위아래로 겹치는
    * 같은 종류 구간을 union-find 로 잇는다. 가장자리에 닿지 않는 빈 덩어리가 내용 성분 하나에만
    * 닿아 있으면 그 성분의 구멍으로 보고 같은 라벨을 준다. 반환값 = 성분 수(라벨 1..n). */
-  function splitLabel(mask, gw, gh, labels) {
+  function splitLabel(mask, gw, gh, labels, out, stride, off, base) {
     var x, y, b, i, j, n = 0;
     for (y = 0; y < gh; y++) { b = y * gw; n++; for (x = 1; x < gw; x++) if (mask[b + x] !== mask[b + x - 1]) n++; }
     var rs = new Int32Array(n), re = new Int32Array(n), rowStart = new Int32Array(gh + 1), par = new Int32Array(n);
@@ -1056,7 +1125,9 @@
         if (!lab[o]) lab[o] = ++nLab;
         L = lab[o];
       }
-      if (L) labels.fill(L, y * gw + rs[i], y * gw + re[i] + 1);
+      if (!L) continue;
+      if (out) out.fill(L + base, off + y * stride + rs[i], off + y * stride + re[i] + 1);
+      else labels.fill(L, y * gw + rs[i], y * gw + re[i] + 1);
     }
     return nLab;
   }
@@ -1102,21 +1173,28 @@
 
   // 볼록 껍질(단조 사슬). 입력 · 출력 모두 [x0,y0,x1,y1,...]. 출력은 반시계 순서의 꼭짓점.
   function splitHull(pts) {
-    var n = pts.length / 2, idx = [], i;
+    var n = pts.length / 2, i, k;
     if (n < 3) return pts.slice();
-    for (i = 0; i < n; i++) idx.push(i);
-    idx.sort(function (p, q) { return pts[2 * p] - pts[2 * q] || pts[2 * p + 1] - pts[2 * q + 1]; });
-    function cross(o, a, b) {
-      return (pts[2 * a] - pts[2 * o]) * (pts[2 * b + 1] - pts[2 * o + 1]) - (pts[2 * a + 1] - pts[2 * o + 1]) * (pts[2 * b] - pts[2 * o]);
+    // (y, x) 사전순 정렬: 좌표(0 이상 정수 · 반정수)와 번호를 숫자 하나로 묶어 기본 숫자 정렬을 쓴다(비교 함수보다 빠름).
+    // y 를 첫 축으로 쓰므로 회전 방향 판정은 x · y 를 바꾼 외적(-cross)으로 한다.
+    var M = 1;
+    while (M <= n) M *= 2;
+    var ord = new Float64Array(n);
+    for (i = 0; i < n; i++) ord[i] = ((pts[2 * i + 1] * 2) * 262144 + pts[2 * i] * 2) * M + i;
+    ord.sort();
+    function cr(o, a, b) {
+      return (pts[2 * a + 1] - pts[2 * o + 1]) * (pts[2 * b] - pts[2 * o]) - (pts[2 * a] - pts[2 * o]) * (pts[2 * b + 1] - pts[2 * o + 1]);
     }
-    var lo = [], up = [], k;
+    var lo = [], up = [], id;
     for (k = 0; k < n; k++) {
-      while (lo.length >= 2 && cross(lo[lo.length - 2], lo[lo.length - 1], idx[k]) <= 0) lo.pop();
-      lo.push(idx[k]);
+      id = ord[k] % M;
+      while (lo.length >= 2 && cr(lo[lo.length - 2], lo[lo.length - 1], id) <= 0) lo.pop();
+      lo.push(id);
     }
     for (k = n - 1; k >= 0; k--) {
-      while (up.length >= 2 && cross(up[up.length - 2], up[up.length - 1], idx[k]) <= 0) up.pop();
-      up.push(idx[k]);
+      id = ord[k] % M;
+      while (up.length >= 2 && cr(up[up.length - 2], up[up.length - 1], id) <= 0) up.pop();
+      up.push(id);
     }
     lo.pop(); up.pop();
     var h = lo.concat(up), out = [];
@@ -1173,7 +1251,7 @@
   }
 
   function splitBandPair(A, B, ctx) {
-    var ha = splitHull(splitHullPts(A)), hb = splitHull(splitHullPts(B));
+    var ha = A.hull, hb = B.hull;
     var rect = splitMinRect(ha.concat(hb));
     var r = rect.deg * Math.PI / 180, cs = Math.cos(r), sn = Math.sin(r);
     // 두 조각을 합친 기운 사각형 축에서 u/v 범위: 한 축으로 크게 겹치고 다른 축으로 떨어져 있어야 한다(기울기 무관)
@@ -1217,7 +1295,6 @@
       var jag = !thin && g <= ctx.thinGap * 3 && Math.max(splitResidual(p1), splitResidual(p2)) > ctx.jag;
       if (!thin && !jag) continue;
       var st = splitGapStats(ctx, cs, sn, dir, p1, p2);
-      if (ctx.log) ctx.log.push({ g: g, thin: thin, tight: tight, jag: jag, dEnd: +dEnd.toFixed(2), st: st });
       if (!st) { if (thin && tight) return true; continue; }
       // 끝이 거의 정확히 맞는 가는 틈은 한 장이 흰 선에 잘린 것으로 보고 합친다(잘못 나누기 방지 우선).
       // 다만 틈 양쪽이 서로 무관하고(상관 < 0.25) 밝기가 크게 다르면(차 ≥ 40, 양쪽 흔들림의 2배 이상)
@@ -1337,7 +1414,7 @@
     A.area += B.area; A.raw += B.raw; A.rawP += B.rawP;
     if (A.band != null || B.band != null) A.band = Math.min(A.band == null ? 1 : A.band, B.band == null ? 1 : B.band);
     A.tint = Math.min(A.tint || 0, B.tint || 0);
-    A.rect = splitMinRect(splitHullPts(A)); A.fill = A.area / A.rect.area;
+    A.hull = splitHull(splitHullPts(A)); A.rect = splitMinRect(A.hull); A.fill = A.area / A.rect.area;
     A.merged = true; B.mergedInto = A.label;
   }
 
