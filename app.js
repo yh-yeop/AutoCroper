@@ -2265,7 +2265,7 @@
         if (prefer && sc.devices.some(function (d) { return d.id === prefer; })) sc.dev.value = prefer;
         if (!sc.devices.length) {
           var o = document.createElement('option'); o.textContent = '스캐너 없음'; sc.dev.appendChild(o);
-          setScanStatus(r && !r.ok && r.error ? r.error : '스캐너를 찾지 못했습니다. 스캐너가 켜져 있고 PC에 스캔 드라이버가 설치돼 있는지 확인한 뒤 ↻를 누르세요.');
+          setScanStatus((r && !r.ok && r.error ? r.error + ' ' : '') + '스캐너를 찾지 못했습니다. Windows에 스캐너로 등록돼 있어야 합니다: 설정 → Bluetooth 및 장치 → 장치 추가에서 스캐너를 추가하거나, 제조사 스캔 드라이버(삼성 · HP 등)를 설치한 뒤 ↻를 누르세요. 쓰던 스캔 프로그램이 있다면 왼쪽 \'감시 폴더\'로도 연동할 수 있습니다.');
         } else {
           setScanStatus('');
           sc.btn.disabled = false;

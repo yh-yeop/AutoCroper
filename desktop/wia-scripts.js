@@ -86,7 +86,8 @@ try {
   $list = @()
   foreach ($di in $dm.DeviceInfos) {
     try {
-      if ($di.Type -ne 1) { continue }
+      # 1 = 스캐너. 일부 드라이버는 0(미지정) 등으로 알리므로 카메라(2) · 비디오(3)만 뺀다
+      if ($di.Type -eq 2 -or $di.Type -eq 3) { continue }
       $id = [string]$di.DeviceID
       $name = [string](Get-PropValue $di.Properties 7 '')
       if (-not $name) { $name = [string](Get-PropValue $di.Properties 4 '') }
