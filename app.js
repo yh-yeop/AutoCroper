@@ -2010,6 +2010,111 @@
   upd.btn.addEventListener('click', function () { if (upd.action) upd.action(); });
   upd.close.addEventListener('click', function () { upd.bar.hidden = true; });
 
+  /* 스캔 (데스크톱 앱): Windows 스캐너(WIA)로 바로 스캔해 그대로 처리 · 저장 */
+  if (native && typeof native.scanDevices === 'function') {
+    var sc = {
+      panel: $('#scan-panel'), btn: $('#scan-btn'), dev: $('#scan-device'), dpi: $('#scan-dpi'),
+      color: $('#scan-color'), refresh: $('#scan-refresh'), status: $('#scan-status'),
+      devices: [], source: 'flatbed', busy: false
+    };
+    sc.panel.hidden = false;
+    var setScanStatus = function (t) { sc.status.textContent = t || ''; };
+    var syncSource = function () {
+      var d = sc.devices.filter(function (x) { return x.id === sc.dev.value; })[0];
+      var feederOk = !d || d.feeder !== false, flatOk = !d || d.flatbed !== false;
+      if (sc.source === 'feeder' && !feederOk) sc.source = 'flatbed';
+      if (sc.source === 'flatbed' && !flatOk && feederOk) sc.source = 'feeder';
+      document.querySelectorAll('[data-src]').forEach(function (b) {
+        b.setAttribute('aria-pressed', String(b.dataset.src === sc.source));
+        b.disabled = b.dataset.src === 'feeder' ? !feederOk : !flatOk;
+      });
+    };
+    var loadDevices = function (prefer) {
+      setScanStatus('스캐너를 찾는 중…');
+      sc.btn.disabled = true;
+      return native.scanDevices().then(function (r) {
+        sc.devices = (r && r.ok && r.devices) || [];
+        sc.dev.textContent = '';
+        sc.devices.forEach(function (d) {
+          var o = document.createElement('option'); o.value = d.id; o.textContent = d.name; sc.dev.appendChild(o);
+        });
+        if (prefer && sc.devices.some(function (d) { return d.id === prefer; })) sc.dev.value = prefer;
+        if (!sc.devices.length) {
+          var o = document.createElement('option'); o.textContent = '스캐너 없음'; sc.dev.appendChild(o);
+          setScanStatus(r && !r.ok && r.error ? r.error : '스캐너를 찾지 못했습니다. 스캐너가 켜져 있고 PC에 스캔 드라이버가 설치돼 있는지 확인한 뒤 ↻를 누르세요.');
+        } else {
+          setScanStatus('');
+          sc.btn.disabled = false;
+        }
+        syncSource();
+      }).catch(function () { setScanStatus('스캐너 목록을 불러오지 못했습니다.'); });
+    };
+    document.querySelectorAll('[data-src]').forEach(function (b) {
+      b.addEventListener('click', function () { sc.source = b.dataset.src; syncSource(); });
+    });
+    sc.dev.addEventListener('change', syncSource);
+    sc.refresh.addEventListener('click', function () { loadDevices(sc.dev.value); });
+    if (typeof native.onScanProgress === 'function') {
+      native.onScanProgress(function (p) {
+        if (!sc.busy || !p) return;
+        setScanStatus(p.state === 'page' && p.page ? '스캔 중… ' + p.page + '쪽 받음' : '스캔 중…');
+      });
+    }
+    sc.btn.addEventListener('click', function () {
+      if (sc.busy) { if (native.cancelScan) native.cancelScan(); return; }
+      if (!sc.devices.length) return;
+      sc.busy = true;
+      sc.btn.textContent = '취소';
+      sc.btn.classList.add('is-busy');
+      setScanStatus('스캔 중…');
+      var t0 = performance.now();
+      native.scan({ deviceId: sc.dev.value, source: sc.source, dpi: Number(sc.dpi.value), color: sc.color.value }).then(function (r) {
+        if (r && r.ok && r.files && r.files.length) {
+          addFiles(r.files.map(function (f) {
+            try { return new File([f.data], f.name, { type: f.type || 'image/png' }); } catch (_) { return null; }
+          }).filter(Boolean));
+          setScanStatus(r.files.length + '쪽 스캔 완료 · ' + ((performance.now() - t0) / 1000).toFixed(0) + '초');
+        } else if (r && r.cancelled) {
+          setScanStatus('스캔을 취소했습니다.');
+        } else {
+          setScanStatus((r && r.error) || '스캔하지 못했습니다.');
+        }
+      }).catch(function (err) {
+        setScanStatus('스캔하지 못했습니다: ' + ((err && err.message) || err));
+      }).then(function () {
+        sc.busy = false;
+        sc.btn.textContent = '스캔';
+        sc.btn.classList.remove('is-busy');
+      });
+    });
+    var restore = typeof native.getScanSettings === 'function' ? native.getScanSettings() : Promise.resolve(null);
+    restore.then(function (st) {
+      st = st || {};
+      if (st.source === 'feeder' || st.source === 'flatbed') sc.source = st.source;
+      if (st.dpi) sc.dpi.value = String(st.dpi);
+      if (st.color) sc.color.value = st.color;
+      return loadDevices(st.deviceId);
+    }).catch(function () { loadDevices(); });
+  }
+
+  /* 감시 폴더 (데스크톱 앱): 스캐너 프로그램이 저장하는 폴더의 새 파일을 자동으로 가져옴 */
+  if (native && typeof native.chooseWatchFolder === 'function') {
+    var wf = { opt: $('#watch-opt'), label: $('#watch-folder'), pick: $('#pick-watch-btn'), stop: $('#stop-watch-btn') };
+    wf.opt.hidden = false;
+    var showWatch = function (p) {
+      wf.label.textContent = p ? p : '꺼짐';
+      wf.label.classList.toggle('is-set', !!p);
+      wf.stop.hidden = !p;
+    };
+    native.getWatchFolder().then(showWatch).catch(function () {});
+    wf.pick.addEventListener('click', function () {
+      native.chooseWatchFolder().then(function (p) { if (p) { showWatch(p); setStatus('감시 중: ' + p + ' — 새 스캔 파일이 생기면 자동으로 처리합니다.'); } });
+    });
+    wf.stop.addEventListener('click', function () {
+      native.stopWatch().then(function () { showWatch(null); setStatus('감시 폴더를 껐습니다.'); });
+    });
+  }
+
   // 웹: 화면 아래 버전(package.json 기준)
   if (!native && window.fetch) {
     fetch('package.json', { cache: 'no-cache' }).then(function (r) { return r.ok ? r.json() : null; }).then(function (j) {

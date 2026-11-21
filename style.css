@@ -181,3 +181,19 @@ figcaption { margin-top: 4px; font-size: 0.8rem; color: var(--muted); font-varia
 .update-bar .primary { background: var(--accent-text); color: var(--accent); }
 .update-bar .icon { border-color: transparent; color: inherit; }
 .foot .link { font-size: inherit; color: var(--muted); text-decoration: underline; }
+
+/* 스캔 (데스크톱 앱) */
+.scan-panel {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 12px;
+}
+.scan-btn { min-width: 96px; font-size: 1rem; }
+.scan-btn.is-busy { background: var(--warn-text); }
+.scan-panel select {
+  padding: 7px 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); max-width: 100%;
+}
+#scan-device { min-width: 160px; flex: 1 1 180px; }
+.seg-sm button { padding: 6px 12px; white-space: nowrap; flex: none; }
+.seg-sm button:disabled { opacity: 0.4; }
+.scan-status { flex-basis: 100%; font-size: 0.85rem; color: var(--muted); }
+.scan-status:empty { display: none; }
