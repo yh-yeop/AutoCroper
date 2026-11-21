@@ -1,7 +1,16 @@
 name: Windows 설치 파일 빌드
 
+# 릴리스 방법: package.json 의 version 을 올려 main 에 push 하면 끝.
+#  - main 에 package.json 이 바뀐 push → 그 버전의 태그(v버전)가 아직 없으면 빌드 후 태그 · 릴리스를 만든다.
+#    (태그가 이미 있으면 = 버전이 그대로면 건너뜀)
+#  - v* 태그를 직접 올려도 같은 릴리스 과정을 탄다.
+#  - 수동 실행(workflow_dispatch): 새 버전이면 릴리스, 이미 있는 버전이면 빌드만 해서 아티팩트로 올린다.
 on:
   push:
+    branches:
+      - main
+    paths:
+      - package.json
     tags:
       - 'v*'
   workflow_dispatch:
@@ -10,7 +19,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release
   cancel-in-progress: false
 
 jobs:
@@ -23,51 +32,77 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: 버전 · 릴리스 여부 판단
+        id: v
+        shell: bash
+        run: |
+          ver="$(node -p "require('./package.json').version")"
+          tag="v${ver}"
+          echo "version=${ver}" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            if [ "${tag}" != "${GITHUB_REF_NAME}" ]; then
+              echo "::error::태그(${GITHUB_REF_NAME})와 package.json 버전(${tag})이 다릅니다."
+              exit 1
+            fi
+            release=true
+          elif git ls-remote --exit-code --tags origin "refs/tags/${tag}" > /dev/null; then
+            echo "${tag} 은(는) 이미 릴리스됐습니다."
+            release=false
+          else
+            release=true
+          fi
+          build=${release}
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then build=true; fi
+          echo "release=${release}" >> "$GITHUB_OUTPUT"
+          echo "build=${build}" >> "$GITHUB_OUTPUT"
+          echo "버전 ${ver} · 빌드 ${build} · 릴리스 ${release}"
+
       - uses: actions/setup-node@v4
+        if: steps.v.outputs.build == 'true'
         with:
           node-version: lts/*
           cache: npm
 
-      - name: 태그와 package.json 버전 확인
-        if: startsWith(github.ref, 'refs/tags/v')
-        shell: bash
-        run: |
-          pkg="$(node -p "require('./package.json').version")"
-          if [ "v${pkg}" != "${GITHUB_REF_NAME}" ]; then
-            echo "::error::태그(${GITHUB_REF_NAME})와 package.json 버전(v${pkg})이 다릅니다."
-            exit 1
-          fi
-
       - name: Electron 캐시
+        if: steps.v.outputs.build == 'true'
         uses: actions/cache@v4
         with:
           path: .cache
           key: electron-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
 
-      - run: npm ci
+      - if: steps.v.outputs.build == 'true'
+        run: npm ci
 
       # --publish never 여도 build.publish 설정이 있으면 latest.yml · .blockmap 은 만들어진다.
       - name: 설치 파일 빌드 (NSIS x64)
+        if: steps.v.outputs.build == 'true'
         run: npx electron-builder --win nsis --x64 --publish never
 
       - name: 업데이트 파일 확인
+        if: steps.v.outputs.build == 'true'
         shell: bash
         run: ls -l dist/*.exe dist/*.exe.blockmap dist/latest.yml && cat dist/latest.yml
 
       - name: 워크플로 아티팩트로 올리기
+        if: steps.v.outputs.build == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: AutoCroper-Setup
+          name: AutoCroper-Setup-${{ steps.v.outputs.version }}
           path: |
             dist/*.exe
             dist/*.exe.blockmap
             dist/latest.yml
           if-no-files-found: error
 
-      - name: GitHub 릴리스에 첨부
-        if: startsWith(github.ref, 'refs/tags/v')
+      # 태그가 없으면 이 커밋에 태그를 만들고 릴리스한다(GITHUB_TOKEN 으로 만든 태그는 이 워크플로를 다시 부르지 않음).
+      - name: 태그 · GitHub 릴리스 만들기
+        if: steps.v.outputs.release == 'true'
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.v.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: AutoCroper ${{ steps.v.outputs.version }}
           # 자동 업데이트(electron-updater)는 최신 '정식' 릴리스의 latest.yml 을 읽는다.
           files: |
             dist/*.exe

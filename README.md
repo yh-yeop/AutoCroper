@@ -113,7 +113,7 @@ npm start            # 개발 실행
 npm run dist:win     # Windows에서: dist/AutoCroper-Setup-<버전>.exe
 ```
 
-릴리스: `package.json`의 `version`을 올리고 같은 이름의 태그(`v1.0.1` 등)를 push하면, GitHub Actions(windows-latest)가 설치 파일 · `latest.yml`을 만들어 Releases에 올리고, 설치된 앱들이 자동으로 업데이트한다.
+릴리스: `package.json`의 `version`을 올려(`npm version patch --no-git-tag-version` 등) `main`에 push하면 끝. GitHub Actions(windows-latest)가 그 버전의 태그(`v1.0.1` 등)가 아직 없을 때만 설치 파일 · `latest.yml`을 빌드해 태그와 정식 릴리스를 만들고, 설치된 앱들이 자동으로 업데이트한다. 버전이 그대로면 빌드하지 않는다.
 
 앱 파일을 고친 뒤에는 `sw.js`의 `VERSION`을 올려야 설치된 앱의 캐시가 확실히 바뀐다.
 
