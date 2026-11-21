@@ -1424,7 +1424,7 @@
     if (!opts.autoSave || !saveTarget || it.saved || it.autoSaving || !it.plan || it.error || it.removed || it.skewBusy) return;
     it.autoSaving = true;
     saveItem(it, false).then(function (path) {
-      setItemMsg(it, '저장됨: ' + path, 'info');
+      markSaved(it, path);
     }).catch(function (err) {
       setItemMsg(it, errText(err), 'warn');
     }).then(function () { it.autoSaving = false; });
@@ -1815,18 +1815,35 @@
     }
     it.ui.resCap.textContent = '결과 · ' + r.w + '×' + r.h;
 
-    var angle = it.state ? it.state.angle : 0;
-    if (plan.empty) {
-      setItemMsg(it, '내용을 찾지 못해 원본을 그대로 둡니다. 임계값을 낮춰 보세요.', 'warn');
-    } else {
-      var notes = [];
-      if (it.skewBusy) notes.push('기울기 보정 중…');
-      else if (angle) notes.push('기울기 ' + (angle > 0 ? '+' : '') + angle.toFixed(2) + '° 자동 보정');
-      if (r.x === 0 && r.y === 0 && r.w === rs.w && r.h === rs.h) notes.push('잘라낼 흰 여백이 없습니다.');
-      setItemMsg(it, notes.join(' · '), notes.length ? 'info' : null);
-    }
+    // 저장한 뒤 결과가 바뀌면(옵션 · 회전 변경) '저장됨' 표시를 지운다
+    var key = outKey(it);
+    if (it.savedPath && it.savedKey !== key) { it.savedPath = null; it.saved = false; }
+    refreshMsg(it);
     it.ui.download.disabled = false;
     refreshToolbar();
+  }
+
+  function outKey(it) {
+    var r = it.plan ? it.plan.rect : null;
+    return r ? [r.x, r.y, r.w, r.h, it.rot, it.state && it.state.angle, opts.format, opts.quality].join(',') : '';
+  }
+
+  // 카드 아래 안내: 경고 > (기울기 보정 · 여백 없음 · 저장됨)을 한 줄로
+  function refreshMsg(it) {
+    var plan = it.plan;
+    if (!plan) return;
+    if (plan.empty) { setItemMsg(it, '내용을 찾지 못해 원본을 그대로 둡니다. 임계값을 낮춰 보세요.', 'warn'); return; }
+    var r = plan.rect, notes = [], angle = it.state ? it.state.angle : 0;
+    if (it.skewBusy) notes.push('기울기 보정 중…');
+    else if (angle) notes.push('기울기 ' + (angle > 0 ? '+' : '') + angle.toFixed(2) + '° 자동 보정');
+    if (r.x === 0 && r.y === 0 && r.w === plan.rotW && r.h === plan.rotH) notes.push('잘라낼 흰 여백이 없습니다.');
+    if (it.savedPath) notes.push('저장됨: ' + it.savedPath);
+    setItemMsg(it, notes.join(' · '), notes.length ? 'info' : null);
+  }
+
+  function markSaved(it, path) {
+    it.savedPath = path; it.savedKey = outKey(it);
+    refreshMsg(it);
   }
 
   /* 내보내기 */
@@ -1857,7 +1874,7 @@
     var label = btn.textContent;
     btn.textContent = saveTarget ? '저장 중…' : '만드는 중…';
     var job = saveTarget
-      ? saveItem(it, true).then(function (path) { setItemMsg(it, '저장됨: ' + path, 'info'); })
+      ? saveItem(it, true).then(function (path) { markSaved(it, path); })
       : makeBlob(it).then(function (blob) { saveBlob(blob, outputName(it.name, opts.format, it.part)); });
     job.catch(function (err) {
       setItemMsg(it, errText(err), 'warn');
@@ -1876,7 +1893,7 @@
       if (!ok) throw new Error('폴더 쓰기 권한이 없습니다.');
       setStatus('저장 중… 0 / ' + ready.length);
       return Promise.all(ready.map(function (it) {
-        return saveItem(it, false).catch(function (err) { failed++; setItemMsg(it, errText(err), 'warn'); }).then(function () {
+        return saveItem(it, false).then(function (path) { markSaved(it, path); }, function (err) { failed++; setItemMsg(it, errText(err), 'warn'); }).then(function () {
           done++; setStatus('저장 중… ' + done + ' / ' + ready.length);
         });
       }));
@@ -1992,6 +2009,14 @@
   }
   upd.btn.addEventListener('click', function () { if (upd.action) upd.action(); });
   upd.close.addEventListener('click', function () { upd.bar.hidden = true; });
+
+  // 웹: 화면 아래 버전(package.json 기준)
+  if (!native && window.fetch) {
+    fetch('package.json', { cache: 'no-cache' }).then(function (r) { return r.ok ? r.json() : null; }).then(function (j) {
+      var wv = $('#web-ver');
+      if (j && j.version && wv) { wv.textContent = ' · v' + j.version; wv.hidden = false; }
+    }).catch(function () {});
+  }
 
   // 데스크톱 앱: GitHub Releases에서 새 버전을 확인 · 내려받고, 준비되면 다시 시작해 설치
   if (native) {

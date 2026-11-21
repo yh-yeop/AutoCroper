@@ -1,6 +1,6 @@
 /* AutoCroper 서비스 워커 — 앱 파일을 캐시해 설치 후 인터넷 없이도 동작하게 한다.
  * 이미지는 여기서도 다루지 않는다(앱 파일만 캐시). 앱을 고치면 VERSION을 올린다. */
-var VERSION = 'v2';
+var VERSION = 'v3';
 var CACHE = 'autocroper-' + VERSION;
 var SHELL = [
   './',
