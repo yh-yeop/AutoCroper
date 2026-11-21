@@ -49,7 +49,9 @@ python -m http.server 8000
 
 1. 이 저장소를 GitHub에 push한다.
 2. **Settings → Pages → Build and deployment**에서 Source를 **Deploy from a branch**, Branch를 **main**, 폴더를 **/ (root)** 로 두고 Save.
-3. 잠시 뒤 `https://<사용자명>.github.io/<저장소명>/crop/` 에서 열린다.
+3. 잠시 뒤 `https://<사용자명>.github.io/<저장소명>/crop/` 에서 열린다(이 저장소는 `https://yh-yeop.github.io/Plans/crop/`).
+
+비공개 저장소는 무료 플랜에서 Pages를 쓸 수 없으니 **Settings → General → Danger Zone → Change visibility → Public**으로 먼저 공개한다.
 
 저장소 루트의 `.nojekyll`이 Jekyll 처리를 끄므로 파일이 그대로 배포된다. 외부 CDN 없이 JSZip 3.10.1을 [`vendor/jszip.min.js`](vendor/jszip.min.js)로 포함한다(MIT, [라이선스](vendor/JSZIP-LICENSE.md)).
 
@@ -63,6 +65,7 @@ crop/
   app.js               크롭 코어(window.WhiteCrop) + UI. 워커 풀은 Blob URL로 생성
   test.html            알고리즘 테스트 페이지
   vendor/jszip.min.js  ZIP 생성(로컬 포함)
+  LICENSE              MIT
 ```
 
 ## 한계
@@ -70,3 +73,7 @@ crop/
 - iOS Safari 등은 캔버스 최대 면적이 작아(약 1,670만 픽셀) 아주 큰 결과는 만들지 못할 수 있다. 그때는 카드에 안내가 뜬다.
 - HEIC 등 브라우저가 열지 못하는 형식은 지원하지 않는다.
 - 자동 기울기 보정은 ±15°까지, 테두리가 곧은 사진에만 적용된다. 보정하면 한 번 보간되므로 아주 미세하게 부드러워진다. 그보다 큰 회전은 90° 회전 버튼으로.
+
+## 라이선스
+
+[MIT](LICENSE). 포함된 JSZip은 MIT/GPLv3 이중 라이선스([JSZIP-LICENSE.md](vendor/JSZIP-LICENSE.md)).
