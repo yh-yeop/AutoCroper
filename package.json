@@ -1,7 +1,7 @@
 {
   "name": "autocroper",
   "productName": "AutoCroper",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "흰 배경 사진 · 스캔본의 흰 여백을 자동으로 잘라 내는 데스크톱 앱. 모든 처리는 이 컴퓨터 안에서만 이뤄집니다.",
   "author": "yh-yeop",
   "license": "MIT",
